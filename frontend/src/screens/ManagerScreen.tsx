@@ -45,17 +45,16 @@ export function ManagerScreen(_props: Props) {
     async (id: string, currentStatus: boolean) => {
       const newStatus = !currentStatus;
       try {
-        const res = await fetch(
-          `${MENU_API_BASE}/api/menu/${encodeURIComponent(id)}/availability`,
-          {
-            method: "PATCH",
-            headers: {
-              Accept: "application/json",
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ is_available: newStatus }),
-          }
-        );
+        const url = `${MENU_API_BASE}/api/menu/${encodeURIComponent(id)}/availability`;
+        console.log('Toggling item ID:', id, 'at URL:', url);
+        const res = await fetch(url, {
+          method: "PATCH",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ is_available: newStatus }),
+        });
 
         if (!res.ok) {
           const text = await res.text();

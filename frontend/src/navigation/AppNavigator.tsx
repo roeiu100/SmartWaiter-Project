@@ -5,6 +5,7 @@ import { GuestMenuScreen } from "../screens/GuestMenuScreen";
 import { KitchenDashboardScreen } from "../screens/KitchenDashboardScreen";
 import { RunnerDashboardScreen } from "../screens/RunnerDashboardScreen";
 import { ManagerScreen } from "../screens/ManagerScreen";
+import { ChatScreen } from "../screens/ChatScreen";
 import { premium } from "../theme/premium";
 
 export type RootStackParamList = {
@@ -13,6 +14,7 @@ export type RootStackParamList = {
   Kitchen: undefined;
   Runner: undefined;
   Manager: undefined;
+  Chat: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -67,6 +69,11 @@ export function AppNavigator() {
           name="Manager"
           component={ManagerScreen}
           options={{ title: "Manager" }}
+        />
+        <Stack.Screen
+          name="Chat"
+          component={ChatScreen}
+          options={{ title: "AI Waiter" }}
         />
       </Stack.Navigator>
     </NavigationContainer>

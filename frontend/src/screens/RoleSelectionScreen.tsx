@@ -35,6 +35,13 @@ const ROLES = [
     route: "Manager" as const,
     accent: premium.manager,
   },
+  {
+    key: "Chat" as const,
+    title: "AI Waiter",
+    hint: "Chat with our menu concierge",
+    route: "Chat" as const,
+    accent: premium.navAccent,
+  },
 ];
 
 export function RoleSelectionScreen({ navigation }: Props) {

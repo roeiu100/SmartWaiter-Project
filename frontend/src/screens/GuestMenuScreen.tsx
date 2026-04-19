@@ -13,7 +13,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { RootStackParamList } from "../navigation/AppNavigator";
-import { fetchMenuFromApi } from "../services/menuApi";
+import { fetchMenuFromApi, MENU_API_BASE } from "../services/menuApi";
 import type { MenuItemRow } from "../types/database";
 import { useSimulatorStore, type CartLine } from "../simulator/simulatorStore";
 import { premium } from "../theme/premium";
@@ -25,27 +25,35 @@ export function GuestMenuScreen(_props: Props) {
   const submitOrder = useSimulatorStore((s) => s.submitOrder);
 
   const [menuItems, setMenuItems] = useState<MenuItemRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [tableId, setTableId] = useState("T12");
   const [quantities, setQuantities] = useState<Record<string, number>>({});
 
   const loadMenu = useCallback(async () => {
-    setLoading(true);
+    const menuUrl = `${MENU_API_BASE}/api/menu`;
+    console.log("Menu fetch URL:", menuUrl);
+
+    setIsLoading(true);
     setError(null);
     try {
       const data = await fetchMenuFromApi();
+      console.log("Data received from backend:", data);
       setMenuItems(data);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load menu");
+      const message =
+        e instanceof Error ? e.message : "Could not load menu";
+      setError(message);
+      console.log("Menu fetch full error:", e);
     } finally {
-      setLoading(false);
+      setIsLoading(false);
     }
   }, []);
 
+  // loadMenu is stable (empty deps); this runs when the Guest screen mounts.
   useEffect(() => {
-    loadMenu();
+    void loadMenu();
   }, [loadMenu]);
 
   const lines: CartLine[] = useMemo(() => {
@@ -118,98 +126,100 @@ export function GuestMenuScreen(_props: Props) {
         />
       </View>
 
-      {loading ? (
-        <View style={styles.centered}>
+      {isLoading ? (
+        <View style={styles.loadingBanner}>
           <ActivityIndicator size="large" color={premium.gold} />
-          <Text style={styles.loadingText}>Loading menu…</Text>
         </View>
-      ) : error ? (
-        <View style={styles.centered}>
+      ) : null}
+
+      {error != null ? (
+        <View style={styles.errorBanner}>
           <Text style={styles.errorText}>{error}</Text>
           <Pressable style={styles.retryBtn} onPress={loadMenu}>
             <Text style={styles.retryBtnText}>Try again</Text>
           </Pressable>
         </View>
-      ) : (
-        <SectionList
-          sections={sections}
-          keyExtractor={(item) => item.id}
-          showsVerticalScrollIndicator={false}
-          stickySectionHeadersEnabled={false}
-          contentContainerStyle={[
-            styles.listContent,
-            { paddingBottom: 140 + insets.bottom },
-          ]}
-          ListHeaderComponent={
-            <View style={styles.listHero}>
-              <Text style={styles.menuKicker}>CHEF&apos;S MENU</Text>
-              <Text style={styles.menuHead}>Selections</Text>
-              <View style={styles.menuRule} />
-              <Text style={styles.menuSub}>
-                Tap + to add dishes to your order
-              </Text>
-            </View>
-          }
-          ListEmptyComponent={
-            <Text style={styles.emptyMenu}>No items available.</Text>
-          }
-          renderSectionHeader={({ section: { title } }) => (
-            <Text style={styles.sectionTitle}>{title}</Text>
-          )}
-          renderItem={({ item }) => {
-            const q = quantities[item.id] ?? 0;
-            return (
-              <View style={styles.card}>
-                <View style={styles.cardRow}>
-                  <View style={styles.rowTextCol}>
-                    <View style={styles.rowTitleRow}>
-                      <Text style={styles.itemName} numberOfLines={2}>
-                        {item.name}
-                      </Text>
-                      <Text style={styles.itemPrice}>
-                        ${item.price.toFixed(2)}
-                      </Text>
-                    </View>
-                    {item.description ? (
-                      <Text style={styles.itemDesc}>{item.description}</Text>
-                    ) : null}
+      ) : null}
+
+      <SectionList
+        style={styles.listFlex}
+        sections={sections}
+        keyExtractor={(item) => item.id}
+        showsVerticalScrollIndicator={false}
+        stickySectionHeadersEnabled={false}
+        contentContainerStyle={[
+          styles.listContent,
+          { paddingBottom: 140 + insets.bottom },
+        ]}
+        ListHeaderComponent={
+          <View style={styles.listHero}>
+            <Text style={styles.menuKicker}>CHEF&apos;S MENU</Text>
+            <Text style={styles.menuHead}>Selections</Text>
+            <View style={styles.menuRule} />
+            <Text style={styles.menuSub}>
+              Tap + to add dishes to your order
+            </Text>
+          </View>
+        }
+        ListEmptyComponent={
+          <Text style={styles.emptyMenu}>No items available.</Text>
+        }
+        renderSectionHeader={({ section: { title } }) => (
+          <Text style={styles.sectionTitle}>{title}</Text>
+        )}
+        renderItem={({ item }) => {
+          const q = quantities[item.id] ?? 0;
+          return (
+            <View style={styles.card}>
+              <View style={styles.cardRow}>
+                <View style={styles.rowTextCol}>
+                  <View style={styles.rowTitleRow}>
+                    <Text style={styles.itemName} numberOfLines={2}>
+                      {item.name}
+                    </Text>
+                    <Text style={styles.itemPrice}>
+                      ${item.price.toFixed(2)}
+                    </Text>
                   </View>
-                  <View style={styles.stepper}>
-                    <Pressable
-                      onPress={() => bump(item.id, -1)}
-                      style={({ pressed }) => [
-                        styles.stepBtn,
-                        q === 0 && styles.stepBtnDisabled,
-                        pressed && q > 0 && styles.stepBtnPressed,
-                      ]}
-                      hitSlop={8}
-                      disabled={q === 0}
+                  {item.description ? (
+                    <Text style={styles.itemDesc}>{item.description}</Text>
+                  ) : null}
+                </View>
+                <View style={styles.stepper}>
+                  <Pressable
+                    onPress={() => bump(item.id, -1)}
+                    style={({ pressed }) => [
+                      styles.stepBtn,
+                      q === 0 && styles.stepBtnDisabled,
+                      pressed && q > 0 && styles.stepBtnPressed,
+                    ]}
+                    hitSlop={8}
+                    disabled={q === 0}
+                  >
+                    <Text style={styles.stepBtnText}>−</Text>
+                  </Pressable>
+                  <Text style={styles.qty}>{q}</Text>
+                  <Pressable
+                    onPress={() => bump(item.id, 1)}
+                    style={({ pressed }) => [
+                      styles.stepBtn,
+                      styles.stepBtnPlus,
+                      pressed && styles.stepBtnPressed,
+                    ]}
+                    hitSlop={8}
+                  >
+                    <Text
+                      style={[styles.stepBtnText, styles.stepBtnTextPlus]}
                     >
-                      <Text style={styles.stepBtnText}>−</Text>
-                    </Pressable>
-                    <Text style={styles.qty}>{q}</Text>
-                    <Pressable
-                      onPress={() => bump(item.id, 1)}
-                      style={({ pressed }) => [
-                        styles.stepBtn,
-                        styles.stepBtnPlus,
-                        pressed && styles.stepBtnPressed,
-                      ]}
-                      hitSlop={8}
-                    >
-                      <Text
-                        style={[styles.stepBtnText, styles.stepBtnTextPlus]}
-                      >
-                        +
-                      </Text>
-                    </Pressable>
-                  </View>
+                      +
+                    </Text>
+                  </Pressable>
                 </View>
               </View>
-            );
-          }}
-        />
-      )}
+            </View>
+          );
+        }}
+      />
 
       <View
         style={[
@@ -233,15 +243,16 @@ export function GuestMenuScreen(_props: Props) {
         <Pressable
           style={({ pressed }) => [
             styles.primary,
-            (lines.length === 0 || loading || !!error) && styles.primaryDisabled,
+            (lines.length === 0 || isLoading || error != null) &&
+              styles.primaryDisabled,
             pressed &&
               lines.length > 0 &&
-              !loading &&
-              !error &&
+              !isLoading &&
+              error == null &&
               styles.primaryPressed,
           ]}
           onPress={onSubmit}
-          disabled={lines.length === 0 || loading || !!error}
+          disabled={lines.length === 0 || isLoading || error != null}
         >
           <Text style={styles.primaryText}>Place order</Text>
         </Pressable>
@@ -262,20 +273,26 @@ const CARD_ELEVATION = Platform.select({
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: premium.screen },
-  centered: {
-    flex: 1,
-    justifyContent: "center",
+  listFlex: { flex: 1 },
+  loadingBanner: {
+    paddingVertical: 20,
     alignItems: "center",
-    paddingHorizontal: 32,
-    gap: 16,
+    justifyContent: "center",
     backgroundColor: premium.screen,
   },
-  loadingText: { fontSize: 15, color: premium.muted, marginTop: 8 },
+  errorBanner: {
+    paddingHorizontal: 24,
+    paddingVertical: 16,
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: premium.screen,
+  },
   errorText: {
     fontSize: 15,
-    color: "#B91C1C",
+    color: "#DC2626",
     textAlign: "center",
     lineHeight: 22,
+    width: "100%",
   },
   retryBtn: {
     backgroundColor: premium.goldDark,
