@@ -66,7 +66,8 @@ const GROQ_CHAT_TOOLS = [
   },
 ];
 
-const GROQ_CHAT_MODEL = "llama3-70b-8192";
+/** Groq retired `llama3-70b-8192`; see https://console.groq.com/docs/deprecations */
+const GROQ_CHAT_MODEL = "llama-3.3-70b-versatile";
 
 // Allow any origin (Expo, physical device, emulators) — tighten for production.
 app.use(
