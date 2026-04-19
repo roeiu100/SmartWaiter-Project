@@ -38,6 +38,18 @@ interface SimulatorState {
   menuItems: MenuItemRow[];
   orders: SimulatorOrder[];
 
+  /** Shared guest cart (menu screen + AI chat) — quantities by menu_item id. */
+  guestCartQuantities: Record<string, number>;
+  guestTableId: string;
+  setGuestCartLine: (menuItemId: UUID, quantity: number) => void;
+  setGuestTableId: (tableId: string) => void;
+  clearGuestCart: () => void;
+  /**
+   * Same pipeline as Guest “Place order”: uses current guestTableId + guestCartQuantities.
+   * Clears cart only when an order is actually created.
+   */
+  submitGuestCartToKitchen: (menu: MenuItemRow[]) => "ok" | "empty";
+
   /** Guest: build cart locally, then submit (pass same menu as on screen). */
   submitOrder: (tableId: string, lines: CartLine[], menu: MenuItemRow[]) => void;
 
@@ -66,7 +78,12 @@ function buildOrder(
 
   for (const line of lines) {
     if (line.quantity <= 0) continue;
-    const menu = menuSource.find((m) => m.id === line.menuItemId);
+    const lineId = String(line.menuItemId).trim();
+    const menu = menuSource.find(
+      (m) =>
+        String(m.id) === lineId ||
+        String(m.id).toLowerCase() === lineId.toLowerCase()
+    );
     if (!menu || !menu.is_available) continue;
     const lineTotal = menu.price * line.quantity;
     total += lineTotal;
@@ -100,6 +117,37 @@ function buildOrder(
 export const useSimulatorStore = create<SimulatorState>((set, get) => ({
   menuItems: MOCK_MENU_ITEMS,
   orders: [],
+  guestCartQuantities: {},
+  guestTableId: "T12",
+
+  setGuestCartLine: (menuItemId, quantity) => {
+    set((s) => {
+      const next = { ...s.guestCartQuantities };
+      if (quantity <= 0) delete next[menuItemId];
+      else next[menuItemId] = quantity;
+      return { guestCartQuantities: next };
+    });
+  },
+
+  setGuestTableId: (tableId) => set({ guestTableId: tableId }),
+
+  clearGuestCart: () => set({ guestCartQuantities: {} }),
+
+  submitGuestCartToKitchen: (menu) => {
+    const { guestTableId, guestCartQuantities } = get();
+    const lines: CartLine[] = Object.entries(guestCartQuantities)
+      .filter(([, q]) => q > 0)
+      .map(([menuItemId, quantity]) => ({
+        menuItemId,
+        quantity: Number(quantity),
+      }));
+    if (lines.length === 0) return "empty";
+    const order = buildOrder(guestTableId.trim() || "T?", lines, menu);
+    if (!order) return "empty";
+    get().submitOrder(guestTableId.trim() || "T?", lines, menu);
+    set({ guestCartQuantities: {} });
+    return "ok";
+  },
 
   submitOrder: (tableId, lines, menu) => {
     const order = buildOrder(tableId.trim() || "T?", lines, menu);
@@ -138,7 +186,8 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
     // REPLACE: PATCH /orders/:id { status: 'delivered' }; notify guest / analytics if needed.
   },
 
-  resetSimulator: () => set({ orders: [] }),
+  resetSimulator: () =>
+    set({ orders: [], guestCartQuantities: {}, guestTableId: "T12" }),
 }));
 
 /**

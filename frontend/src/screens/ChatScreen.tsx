@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -13,14 +15,44 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { RootStackParamList } from "../navigation/AppNavigator";
+import { fetchMenuFromApi } from "../services/menuApi";
 import {
   sendChatToApi,
   type ChatMessage,
   type ParsedToolCall,
 } from "../services/chatApi";
+import { useSimulatorStore } from "../simulator/simulatorStore";
 import { premium } from "../theme/premium";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Chat">;
+
+function normToolName(name: string | null | undefined): string {
+  return String(name ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "_");
+}
+
+function lastUserLanguage(messages: ChatMessage[]): "he" | "en" {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user" && messages[i].content.trim()) {
+      return /[\u0590-\u05FF]/.test(messages[i].content) ? "he" : "en";
+    }
+  }
+  return "en";
+}
+
+type SubmitOutcome = "ok" | "empty" | "error" | null;
+
+async function submitOrderToKitchenSimulator(): Promise<SubmitOutcome> {
+  try {
+    const menu = await fetchMenuFromApi();
+    return useSimulatorStore.getState().submitGuestCartToKitchen(menu);
+  } catch (e) {
+    console.error("[Chat] submitGuestCartToKitchen / fetch menu failed:", e);
+    return "error";
+  }
+}
 
 export function ChatScreen(_props: Props) {
   const insets = useSafeAreaInsets();
@@ -30,7 +62,7 @@ export function ChatScreen(_props: Props) {
     {
       role: "assistant",
       content:
-        "Hi — I'm your AI waiter. Ask about the menu, pairings, or tell me what you'd like and I can help build your order.",
+        "Hi — I'm your AI waiter. Ask about the menu or tell me what you'd like to order.",
     },
   ]);
   const [input, setInput] = useState("");
@@ -41,33 +73,71 @@ export function ChatScreen(_props: Props) {
     listRef.current?.scrollToEnd({ animated: true });
   }, [messages.length]);
 
-  const handleToolCalls = useCallback((tool_calls: ParsedToolCall[]) => {
+  useEffect(() => {
+    const show = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
+      () => {
+        requestAnimationFrame(() =>
+          listRef.current?.scrollToEnd({ animated: true })
+        );
+      }
+    );
+    return () => show.remove();
+  }, []);
+
+  const applyToolCalls = useCallback(async (tool_calls: ParsedToolCall[]) => {
     for (const tc of tool_calls) {
-      console.log("[Chat] Tool call from AI waiter:", tc);
-      if (
-        tc.name === "update_cart" &&
-        tc.arguments &&
-        typeof tc.arguments === "object"
-      ) {
-        const { item_id, quantity, special_requests } = tc.arguments as {
-          item_id?: unknown;
-          quantity?: unknown;
-          special_requests?: unknown;
-        };
-        console.log("[Chat] update_cart payload:", {
-          item_id,
-          quantity,
-          special_requests,
-        });
-        // -------------------------------------------------------------------------
-        // TODO (Zustand cart): apply AI line items here, e.g.:
-        //   useCartStore.getState().setLine(String(item_id), Number(quantity), String(special_requests ?? ''))
-        // SmartWaiter today keeps cart in GuestMenuScreen local state; consider
-        // moving quantities into simulatorStore (or a dedicated cart slice) so
-        // this screen and the menu share one source of truth.
-        // -------------------------------------------------------------------------
+      if (normToolName(tc.name) !== "update_cart") continue;
+
+      console.log("[Chat] Tool call (update_cart):", tc);
+
+      if (!tc.arguments || typeof tc.arguments !== "object") continue;
+
+      const { item_id, quantity, special_requests } = tc.arguments as {
+        item_id?: unknown;
+        quantity?: unknown;
+        special_requests?: unknown;
+      };
+      console.log("[Chat] update_cart payload:", {
+        item_id,
+        quantity,
+        special_requests,
+      });
+      const id = item_id != null ? String(item_id) : "";
+      const qty = Number(quantity);
+      if (id && Number.isFinite(qty)) {
+        useSimulatorStore.getState().setGuestCartLine(id, qty);
       }
     }
+
+    let submitOutcome: SubmitOutcome = null;
+    const wantsSubmit = tool_calls.some(
+      (tc) =>
+        normToolName(tc.name) === "submit_order" ||
+        tc.name === "submit_order"
+    );
+
+    if (wantsSubmit) {
+      console.log(
+        "[Chat] submit_order detected — invoking submitGuestCartToKitchen (same as Guest checkout)",
+        JSON.stringify(tool_calls.map((t) => ({ name: t.name, args: t.arguments })))
+      );
+      submitOutcome = await submitOrderToKitchenSimulator();
+
+      if (submitOutcome === "ok") {
+        Alert.alert("Success", "Order sent to kitchen!");
+        useSimulatorStore.getState().clearGuestCart();
+      } else if (submitOutcome === "empty") {
+        Alert.alert(
+          "Cannot send",
+          "Your cart is empty or has no available items to send."
+        );
+      } else {
+        Alert.alert("Error", "Could not send the order. Please try again.");
+      }
+    }
+
+    return { submitOutcome };
   }, []);
 
   const onSend = useCallback(async () => {
@@ -82,23 +152,62 @@ export function ChatScreen(_props: Props) {
     setInput("");
     setSending(true);
 
+    const lang = lastUserLanguage([...messages, userMsg]);
+
     try {
       const { assistantText, tool_calls } = await sendChatToApi(historyForApi);
 
+      let submitOutcome: SubmitOutcome = null;
       if (tool_calls.length > 0) {
-        handleToolCalls(tool_calls);
+        const r = await applyToolCalls(tool_calls);
+        submitOutcome = r.submitOutcome;
       }
 
-      const toolSummary =
-        tool_calls.length > 0
-          ? summarizeToolCallsForUi(tool_calls)
-          : null;
+      const hadUpdateCart = tool_calls.some(
+        (t) => normToolName(t.name) === "update_cart"
+      );
+      const hadSubmitOrder = tool_calls.some(
+        (t) =>
+          normToolName(t.name) === "submit_order" || t.name === "submit_order"
+      );
 
-      const combined =
-        assistantText ||
-        (toolSummary
-          ? `I've noted your cart changes.${toolSummary ? `\n\n${toolSummary}` : ""}`
-          : "Done.");
+      let combined = (assistantText && assistantText.trim()) || "";
+
+      if (!combined && hadUpdateCart) {
+        combined =
+          lang === "he"
+            ? "עדכנתי את העגלה."
+            : "I've updated your cart.";
+      }
+
+      if (hadSubmitOrder) {
+        if (submitOutcome === "ok") {
+          combined = combined
+            ? `${combined}\n\n${lang === "he" ? "ההזמנה נשלחה למטבח." : "Your order was sent to the kitchen."}`
+            : lang === "he"
+              ? "ההזמנה נשלחה למטבח."
+              : "Your order was sent to the kitchen.";
+        } else if (submitOutcome === "empty") {
+          combined = combined
+            ? `${combined}\n\n${lang === "he" ? "לא ניתן לשלוח — העגלה ריקה או שאין פריטים זמינים." : "Couldn't send — cart is empty or has no available items."}`
+            : lang === "he"
+              ? "לא ניתן לשלוח — העגלה ריקה או שאין פריטים זמינים."
+              : "Couldn't send — cart is empty or has no available items.";
+        } else if (submitOutcome === "error") {
+          combined = combined
+            ? `${combined}\n\n${lang === "he" ? "שגיאה בשליחת ההזמנה." : "There was an error sending your order."}`
+            : lang === "he"
+              ? "שגיאה בשליחת ההזמנה."
+              : "There was an error sending your order.";
+        }
+      }
+
+      if (!combined) {
+        combined =
+          lang === "he"
+            ? "לא קיבלתי תשובה. נסו שוב."
+            : "I didn't get a reply. Please try again.";
+      }
 
       setMessages((prev) => [
         ...prev,
@@ -112,13 +221,16 @@ export function ChatScreen(_props: Props) {
         ...prev,
         {
           role: "assistant",
-          content: `Sorry — I couldn't reach the waiter service. (${msg})`,
+          content:
+            lang === "he"
+              ? `מצטערים — לא הצלחתי להתחבר לשירות. (${msg})`
+              : `Sorry — I couldn't reach the waiter service. (${msg})`,
         },
       ]);
     } finally {
       setSending(false);
     }
-  }, [input, messages, sending, handleToolCalls]);
+  }, [input, messages, sending, applyToolCalls]);
 
   const renderItem = useCallback(
     ({ item: m }: { item: ChatMessage }) => {
@@ -153,96 +265,79 @@ export function ChatScreen(_props: Props) {
 
   return (
     <KeyboardAvoidingView
-      style={styles.root}
+      style={styles.chatRoot}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
-      keyboardVerticalOffset={Platform.OS === "ios" ? 8 : 0}
+      keyboardVerticalOffset={90}
     >
       <FlatList
         ref={listRef}
+        style={styles.list}
         data={messages}
         keyExtractor={(_, index) => `msg-${index}`}
         renderItem={renderItem}
-        contentContainerStyle={[
-          styles.listContent,
-          { paddingTop: 12, paddingBottom: 12 },
-        ]}
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={[styles.listContent, { paddingTop: 12, paddingBottom: 12 }]}
         onContentSizeChange={() =>
           listRef.current?.scrollToEnd({ animated: true })
         }
       />
 
-      {errorBanner ? (
-        <View style={styles.errorStrip}>
-          <Text style={styles.errorStripText}>{errorBanner}</Text>
-        </View>
-      ) : null}
+        {errorBanner ? (
+          <View style={styles.errorStrip}>
+            <Text style={styles.errorStripText}>{errorBanner}</Text>
+          </View>
+        ) : null}
 
-      <View
-        style={[
-          styles.composer,
-          {
-            paddingBottom: Math.max(insets.bottom, 12),
-            paddingTop: 10,
-          },
-        ]}
-      >
-        <View style={styles.inputRow}>
-          <TextInput
-            style={styles.input}
-            value={input}
-            onChangeText={setInput}
-            placeholder="Message your waiter…"
-            placeholderTextColor={premium.mutedLight}
-            multiline
-            maxLength={2000}
-            editable={!sending}
-            blurOnSubmit={false}
-          />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Send message"
-            onPress={() => void onSend()}
-            disabled={sending || !input.trim()}
-            style={({ pressed }) => [
-              styles.sendBtn,
-              (sending || !input.trim()) && styles.sendBtnDisabled,
-              pressed && !(sending || !input.trim()) && styles.sendBtnPressed,
-            ]}
-          >
-            {sending ? (
-              <ActivityIndicator color={premium.onNav} size="small" />
-            ) : (
-              <Text style={styles.sendBtnLabel}>Send</Text>
-            )}
-          </Pressable>
+        <View
+          style={[
+            styles.composer,
+            { paddingBottom: Math.max(insets.bottom, 10) },
+          ]}
+        >
+          <View style={styles.inputRow}>
+            <TextInput
+              style={styles.input}
+              value={input}
+              onChangeText={setInput}
+              placeholder="Message your waiter…"
+              placeholderTextColor={premium.mutedLight}
+              multiline
+              maxLength={2000}
+              editable={!sending}
+              blurOnSubmit={false}
+            />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Send message"
+              onPress={() => void onSend()}
+              disabled={sending || !input.trim()}
+              style={({ pressed }) => [
+                styles.sendBtn,
+                (sending || !input.trim()) && styles.sendBtnDisabled,
+                pressed && !(sending || !input.trim()) && styles.sendBtnPressed,
+              ]}
+            >
+              {sending ? (
+                <ActivityIndicator color={premium.onNav} size="small" />
+              ) : (
+                <Text style={styles.sendBtnLabel}>Send</Text>
+              )}
+            </Pressable>
+          </View>
         </View>
-      </View>
     </KeyboardAvoidingView>
   );
-}
-
-function summarizeToolCallsForUi(tool_calls: ParsedToolCall[]): string {
-  const lines: string[] = [];
-  for (const tc of tool_calls) {
-    if (tc.name !== "update_cart" || !tc.arguments) continue;
-    const a = tc.arguments;
-    const id = a.item_id != null ? String(a.item_id) : "?";
-    const q = a.quantity != null ? String(a.quantity) : "?";
-    const note =
-      a.special_requests != null && String(a.special_requests).trim()
-        ? ` · ${String(a.special_requests).trim()}`
-        : "";
-    lines.push(`• Cart: item ${id} × ${q}${note}`);
-  }
-  return lines.length > 0 ? lines.join("\n") : "";
 }
 
 const BUBBLE_MAX = "82%";
 
 const styles = StyleSheet.create({
-  root: {
+  chatRoot: {
     flex: 1,
     backgroundColor: premium.screenDeep,
+  },
+  list: {
+    flex: 1,
   },
   listContent: {
     paddingHorizontal: 14,
@@ -299,6 +394,7 @@ const styles = StyleSheet.create({
     borderTopColor: premium.border,
     backgroundColor: premium.ivory,
     paddingHorizontal: 12,
+    paddingTop: 10,
   },
   inputRow: {
     flexDirection: "row",

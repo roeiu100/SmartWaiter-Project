@@ -71,21 +71,26 @@ export async function sendChatToApi(
       const fn = row.function as Record<string, unknown> | undefined;
       const argStr = fn?.arguments;
       if (typeof argStr === "string") {
-        try {
-          args = JSON.parse(argStr) as Record<string, unknown>;
-        } catch {
-          args = { _raw: argStr };
+        const t = argStr.trim();
+        if (t === "" || t === "{}") {
+          args = {};
+        } else {
+          try {
+            args = JSON.parse(t) as Record<string, unknown>;
+          } catch {
+            args = { _raw: argStr };
+          }
         }
       } else if (argStr && typeof argStr === "object") {
         args = argStr as Record<string, unknown>;
       }
     }
+    const fnBlock = row.function as Record<string, unknown> | undefined;
     const name =
       typeof row.name === "string"
         ? row.name
-        : typeof (row.function as Record<string, unknown> | undefined)?.name ===
-            "string"
-          ? String((row.function as Record<string, unknown>).name)
+        : typeof fnBlock?.name === "string"
+          ? String(fnBlock.name)
           : null;
     return {
       id: typeof row.id === "string" ? row.id : undefined,

@@ -22,6 +22,31 @@ let io;
 // =============================================================================
 const SYSTEM_PROMPT = `You are a professional, friendly waiter at our restaurant. You speak clearly and warmly, never rush the guest, and you proactively help them feel welcome.
 
+
+YOU MUST FOLLOW THIS EXACT WORKFLOW (STATE MACHINE):
+
+1. GREETING (Start of chat):
+If the user says hello or the chat just started, welcome them and direct them to the menu. 
+Example: "שלום! אני המלצר שלכם. אתם מוזמנים להסתכל בתפריט שלנו, אני כאן לכל שאלה או כדי לקחת את ההזמנה."
+
+2. DISH-SPECIFIC RULES (Before adding to cart):
+- BURGERS: If a user orders a burger, you MUST ask if the standard vegetables and toppings are okay, or if they want any changes, BEFORE using the update_cart tool.
+- (Other dish rules will be added here in the future).
+
+3. CONTINUING THE ORDER (After adding to cart):
+Every time you successfully use the 'update_cart' tool, your text response MUST confirm the addition in one short sentence and ask if they want anything else.
+Example: "הוספתי את ההמבורגר לעגלה. תרצו להזמין משהו נוסף?"
+
+4. ORDER SUMMARY & CONFIRMATION:
+If the user indicates they are done ordering (e.g., "לא, זה הכל", "No thanks"), you MUST summarize their entire current cart (read back the items and quantities) and ask for explicit permission to send it to the kitchen.
+Example: "מצוין. אז יש לנו 2 המבורגרים וקולה. לאשר ולשלוח את ההזמנה למטבח?"
+
+5. SUBMISSION TO KITCHEN:
+Only use the 'submit_order' tool AFTER the user explicitly says "yes" to your summary. When triggered, confirm with: "ההזמנה נשלחה למטבח! בתאבון."
+
+6. PAYMENT & CHECKOUT:
+If the user asks for the bill, wants to pay, or says "חשבון בבקשה", trigger the 'go_to_payment' tool and say: "מיד מעביר אתכם למסך התשלום."
+
 Your goals:
 - Answer questions about dishes, ingredients, spice level, and dietary concerns honestly. If you are unsure, say so and suggest they ask the kitchen or manager.
 - Help the customer build an order that fits their party size, budget, and preferences. Offer sensible pairings or popular choices when it helps (upsell gently—never pushy).
@@ -33,7 +58,9 @@ Your goals:
 Strict rules:
 - Do not claim an item is available if the menu shows is_available: false; politely suggest alternatives.
 - Do not process payments or personal financial data; you only help with food and drink selection.
-- If asked for anything outside the restaurant (legal, medical, unrelated topics), decline briefly and return to the dining experience.`;
+- If asked for anything outside the restaurant (legal, medical, unrelated topics), decline briefly and return to the dining experience.
+
+CRITICAL: ALWAYS respond in the SAME LANGUAGE as the user's last message (Hebrew or English). When you trigger the 'update_cart' or 'submit_order' tools, your text response MUST be a single, extremely short, natural sentence confirming the action in the user's language (e.g., 'I added the burger. Ready to order?' or 'הוספתי לעגלה. לשלוח למטבח?'). NEVER output raw JSON, technical names, or logs in the conversation.`;
 
 /** Groq function-calling: cart updates from the model (schema is fixed; behavior is enforced in the client). */
 const GROQ_CHAT_TOOLS = [
@@ -61,6 +88,19 @@ const GROQ_CHAT_TOOLS = [
           },
         },
         required: ["item_id", "quantity", "special_requests"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "submit_order",
+      description:
+        "Call when the guest explicitly confirms they want to send the current cart to the kitchen (same as tapping checkout in the app). No parameters.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
       },
     },
   },
@@ -231,28 +271,40 @@ ${menuJson}`;
     const tool_calls = rawToolCalls.map((tc) => {
       let parsedArgs = null;
       const raw = tc.function?.arguments;
-      if (typeof raw === "string") {
-        try {
-          parsedArgs = JSON.parse(raw);
-        } catch (parseErr) {
-          console.error(
-            "[api/chat] Failed to parse tool arguments JSON:",
-            raw,
-            parseErr
-          );
-          parsedArgs = { _raw: raw, _parseError: String(parseErr) };
+      if (raw === undefined || raw === null) {
+        parsedArgs = {};
+      } else if (typeof raw === "string") {
+        const trimmed = raw.trim();
+        if (trimmed === "" || trimmed === "{}") {
+          parsedArgs = {};
+        } else {
+          try {
+            parsedArgs = JSON.parse(trimmed);
+          } catch (parseErr) {
+            console.error(
+              "[api/chat] Failed to parse tool arguments JSON:",
+              raw,
+              parseErr
+            );
+            parsedArgs = { _raw: raw, _parseError: String(parseErr) };
+          }
         }
+      } else if (typeof raw === "object") {
+        parsedArgs = raw;
       }
+      const fnName = tc.function?.name ?? tc.name ?? null;
       return {
         id: tc.id,
-        name: tc.function?.name ?? null,
+        name: fnName,
         arguments: parsedArgs,
       };
     });
 
-    const hasUpdateCart = tool_calls.some((t) => t.name === "update_cart");
+    const hasClientTools = tool_calls.some(
+      (t) => t.name === "update_cart" || t.name === "submit_order"
+    );
 
-    if (hasUpdateCart) {
+    if (hasClientTools) {
       return res.json({
         text,
         tool_calls,

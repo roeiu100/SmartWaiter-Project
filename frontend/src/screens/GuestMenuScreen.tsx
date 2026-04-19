@@ -23,14 +23,17 @@ type Props = NativeStackScreenProps<RootStackParamList, "Guest">;
 
 export function GuestMenuScreen(_props: Props) {
   const insets = useSafeAreaInsets();
-  const submitOrder = useSimulatorStore((s) => s.submitOrder);
+  const guestTableId = useSimulatorStore((s) => s.guestTableId);
+  const setGuestTableId = useSimulatorStore((s) => s.setGuestTableId);
+  const guestCartQuantities = useSimulatorStore((s) => s.guestCartQuantities);
+  const setGuestCartLine = useSimulatorStore((s) => s.setGuestCartLine);
+  const submitGuestCartToKitchen = useSimulatorStore(
+    (s) => s.submitGuestCartToKitchen
+  );
 
   const [menuItems, setMenuItems] = useState<MenuItemRow[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const [tableId, setTableId] = useState("T12");
-  const [quantities, setQuantities] = useState<Record<string, number>>({});
 
   const loadMenu = useCallback(async (opts?: { silent?: boolean }) => {
     const silent = opts?.silent === true;
@@ -96,10 +99,10 @@ export function GuestMenuScreen(_props: Props) {
   }, [loadMenu]);
 
   const lines: CartLine[] = useMemo(() => {
-    return Object.entries(quantities)
+    return Object.entries(guestCartQuantities)
       .filter(([, q]) => q > 0)
       .map(([menuItemId, quantity]) => ({ menuItemId, quantity }));
-  }, [quantities]);
+  }, [guestCartQuantities]);
 
   const total = useMemo(() => {
     let sum = 0;
@@ -115,15 +118,14 @@ export function GuestMenuScreen(_props: Props) {
     [lines]
   );
 
-  const bump = (id: string, delta: number) => {
-    setQuantities((prev) => {
-      const next = Math.max(0, (prev[id] ?? 0) + delta);
-      const copy = { ...prev };
-      if (next === 0) delete copy[id];
-      else copy[id] = next;
-      return copy;
-    });
-  };
+  const bump = useCallback(
+    (id: string, delta: number) => {
+      const prev =
+        useSimulatorStore.getState().guestCartQuantities[id] ?? 0;
+      setGuestCartLine(id, Math.max(0, prev + delta));
+    },
+    [setGuestCartLine]
+  );
 
   const onSubmit = () => {
     if (lines.length === 0) {
@@ -134,9 +136,15 @@ export function GuestMenuScreen(_props: Props) {
       Alert.alert("Menu not ready", "Wait for the menu to load.");
       return;
     }
-    submitOrder(tableId, lines, menuItems);
+    const outcome = submitGuestCartToKitchen(menuItems);
+    if (outcome === "empty") {
+      Alert.alert(
+        "Cart empty",
+        "No available items in the cart to send to the kitchen."
+      );
+      return;
+    }
     Alert.alert("Order sent", "Kitchen will see this order in the simulator.");
-    setQuantities({});
     // REPLACE: POST /orders with table_id + lines; show server validation errors.
   };
 
@@ -156,8 +164,8 @@ export function GuestMenuScreen(_props: Props) {
       <View style={styles.tablePanel}>
         <Text style={styles.tableLabel}>Table</Text>
         <TextInput
-          value={tableId}
-          onChangeText={setTableId}
+          value={guestTableId}
+          onChangeText={setGuestTableId}
           placeholder="e.g. T12"
           placeholderTextColor={premium.mutedLight}
           style={styles.input}
@@ -207,7 +215,7 @@ export function GuestMenuScreen(_props: Props) {
           <Text style={styles.sectionTitle}>{title}</Text>
         )}
         renderItem={({ item }) => {
-          const q = quantities[item.id] ?? 0;
+          const q = guestCartQuantities[item.id] ?? 0;
           return (
             <View style={styles.card}>
               <View style={styles.cardRow}>
