@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { io } from "socket.io-client";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
@@ -24,21 +25,60 @@ export function ManagerScreen(_props: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const loadMenu = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const loadMenu = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent === true;
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const data = await fetchMenuFromApi();
       setMenuItems(data);
+      if (silent) {
+        setError(null);
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load menu");
+      const message =
+        e instanceof Error ? e.message : "Could not load menu";
+      if (silent) {
+        console.warn("[Manager] Silent menu refresh failed:", message);
+      } else {
+        setError(message);
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
-    loadMenu();
+    void loadMenu();
+  }, [loadMenu]);
+
+  useEffect(() => {
+    const baseUrl = process.env.EXPO_PUBLIC_API_URL?.trim();
+    if (!baseUrl) {
+      console.warn(
+        "[Manager] EXPO_PUBLIC_API_URL is not set; Socket.io menu sync disabled"
+      );
+      return;
+    }
+
+    const socket = io(baseUrl, {
+      transports: ["websocket", "polling"],
+    });
+
+    const onMenuUpdated = () => {
+      void loadMenu({ silent: true });
+    };
+
+    socket.on("menu_updated", onMenuUpdated);
+
+    return () => {
+      socket.off("menu_updated", onMenuUpdated);
+      socket.disconnect();
+    };
   }, [loadMenu]);
 
   const toggleAvailability = useCallback(

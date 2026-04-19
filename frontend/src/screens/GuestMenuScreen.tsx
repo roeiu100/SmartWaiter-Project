@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { io } from "socket.io-client";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
@@ -31,29 +32,67 @@ export function GuestMenuScreen(_props: Props) {
   const [tableId, setTableId] = useState("T12");
   const [quantities, setQuantities] = useState<Record<string, number>>({});
 
-  const loadMenu = useCallback(async () => {
+  const loadMenu = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent === true;
     const menuUrl = `${MENU_API_BASE}/api/menu`;
-    console.log("Menu fetch URL:", menuUrl);
-
-    setIsLoading(true);
-    setError(null);
+    if (!silent) {
+      console.log("Menu fetch URL:", menuUrl);
+      setIsLoading(true);
+      setError(null);
+    }
     try {
       const data = await fetchMenuFromApi();
-      console.log("Data received from backend:", data);
+      if (!silent) {
+        console.log("Data received from backend:", data);
+      }
       setMenuItems(data);
+      if (silent) {
+        setError(null);
+      }
     } catch (e) {
       const message =
         e instanceof Error ? e.message : "Could not load menu";
-      setError(message);
-      console.log("Menu fetch full error:", e);
+      if (silent) {
+        console.warn("[GuestMenu] Silent menu refresh failed:", message);
+      } else {
+        setError(message);
+        console.log("Menu fetch full error:", e);
+      }
     } finally {
-      setIsLoading(false);
+      if (!silent) {
+        setIsLoading(false);
+      }
     }
   }, []);
 
   // loadMenu is stable (empty deps); this runs when the Guest screen mounts.
   useEffect(() => {
     void loadMenu();
+  }, [loadMenu]);
+
+  useEffect(() => {
+    const baseUrl = process.env.EXPO_PUBLIC_API_URL?.trim();
+    if (!baseUrl) {
+      console.warn(
+        "[GuestMenu] EXPO_PUBLIC_API_URL is not set; Socket.io menu sync disabled"
+      );
+      return;
+    }
+
+    const socket = io(baseUrl, {
+      transports: ["websocket", "polling"],
+    });
+
+    const onMenuUpdated = () => {
+      void loadMenu({ silent: true });
+    };
+
+    socket.on("menu_updated", onMenuUpdated);
+
+    return () => {
+      socket.off("menu_updated", onMenuUpdated);
+      socket.disconnect();
+    };
   }, [loadMenu]);
 
   const lines: CartLine[] = useMemo(() => {
@@ -135,7 +174,7 @@ export function GuestMenuScreen(_props: Props) {
       {error != null ? (
         <View style={styles.errorBanner}>
           <Text style={styles.errorText}>{error}</Text>
-          <Pressable style={styles.retryBtn} onPress={loadMenu}>
+          <Pressable style={styles.retryBtn} onPress={() => void loadMenu()}>
             <Text style={styles.retryBtnText}>Try again</Text>
           </Pressable>
         </View>

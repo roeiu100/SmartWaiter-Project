@@ -1,15 +1,20 @@
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
 const path = require("path");
+const http = require("http");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 
 const cors = require("cors");
 const express = require("express");
+const { Server } = require("socket.io");
 const { createClient } = require("@supabase/supabase-js");
 const Groq = require("groq-sdk").default;
 
 const app = express();
 const PORT = 3000;
+
+/** Set after `new Server(...)` — used from HTTP handlers to push realtime events. */
+let io;
 
 // =============================================================================
 // SYSTEM_PROMPT — Edit persona, upselling, tone, and strict rules here only.
@@ -149,6 +154,11 @@ app.patch("/api/menu/:id/availability", async (req, res) => {
       return res.status(404).json({ error: "Menu item not found" });
     }
 
+    io.emit("menu_updated", {
+      menu_item_id: updated.id,
+      is_available: updated.is_available,
+    });
+
     return res.json({
       menu_item_id: updated.id,
       is_available: updated.is_available,
@@ -264,6 +274,21 @@ ${menuJson}`;
   }
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`SmartWaiter API listening on http://0.0.0.0:${PORT} (reachable from your LAN)`);
+const server = http.createServer(app);
+
+io = new Server(server, {
+  cors: { origin: "*" },
+});
+
+io.on("connection", (socket) => {
+  console.log("[socket.io] client connected:", socket.id);
+  socket.on("disconnect", (reason) => {
+    console.log("[socket.io] client disconnected:", socket.id, reason);
+  });
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(
+    `SmartWaiter API + Socket.io listening on http://0.0.0.0:${PORT} (reachable from your LAN)`
+  );
 });
