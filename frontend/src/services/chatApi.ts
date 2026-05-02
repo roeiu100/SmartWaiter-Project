@@ -45,9 +45,17 @@ export async function sendChatToApi(
   }
 
   if (!res.ok) {
+    const body = json as { error?: string; code?: string };
+    if (res.status === 429 || body.code === "rate_limit") {
+      throw new Error(
+        typeof body.error === "string" && body.error.length > 0
+          ? body.error
+          : "The AI waiter is briefly unavailable (usage limit). Please try again soon."
+      );
+    }
     const errMsg =
-      typeof (json as { error?: string })?.error === "string"
-        ? (json as { error: string }).error
+      typeof body.error === "string"
+        ? body.error
         : rawText.slice(0, 200);
     throw new Error(`Chat request failed (${res.status}): ${errMsg}`);
   }

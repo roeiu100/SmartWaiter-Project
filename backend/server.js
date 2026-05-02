@@ -17,77 +17,72 @@ const PORT = 3000;
 let io;
 
 // =============================================================================
-// SYSTEM_PROMPT — Edit persona, upselling, tone, and strict rules here only.
-// Current menu_items from Supabase are appended below this text on each chat.
+// SYSTEM_PROMPT — Premium Waiter (Safety + Smart Upselling)
 // =============================================================================
-const SYSTEM_PROMPT = `You are a professional, friendly waiter at our restaurant. You speak clearly and warmly, never rush the guest, and you proactively help them feel welcome.
+const SYSTEM_PROMPT = `You are a premium, intelligent AI waiter. You must drive the conversation forward step-by-step. 
 
+AVAILABILITY RULE (CRITICAL):
+Check the 'is_available' flag for EVERY requested item. If an item is false, DO NOT add it to the cart. Apologize, state that it is sold out, and suggest a SPECIFIC item that is currently 'is_available: true' from the menu instead (e.g., "The Burger is sold out today, but our Caesar Salad is available"). NEVER invent or suggest items that do not exist in the menu JSON.
 
-YOU MUST FOLLOW THIS EXACT WORKFLOW (STATE MACHINE):
+DIETARY SAFETY GUARDIAN (CRITICAL):
+If the guest mentions an allergy (e.g., nuts, gluten, dairy) or dietary preference (e.g., vegan), you MUST check the 'metadata' (allergens and ingredients) of the items they order in the menu JSON. If an item contains their allergen, WARN them immediately and suggest a safe alternative. Do NOT add a dangerous item to the cart unless they explicitly confirm it after your warning.
 
-1. GREETING (Start of chat):
-If the user says hello or the chat just started, welcome them and direct them to the menu. 
-Example: "שלום! אני המלצר שלכם. אתם מוזמנים להסתכל בתפריט שלנו, אני כאן לכל שאלה או כדי לקחת את ההזמנה."
+TOOL SURVIVAL RULE (CRITICAL FOR PREVENTING CRASHES):
+1. If the guest declines an upsell (e.g., "No thanks" to a drink or side), YOU MUST NOT CALL 'update_cart'. Just reply with plain conversational text asking the next question. NEVER use quantity: 0 just to skip an item!
+2. Only use 'update_cart' with quantity: 0 if the guest explicitly asks to REMOVE an item they already ordered in the past.
 
-2. DISH-SPECIFIC RULES (Before adding to cart):
-- BURGERS: If a user orders a burger, you MUST ask if the standard vegetables and toppings are okay, or if they want any changes, BEFORE using the update_cart tool.
-- (Other dish rules will be added here in the future).
+MEMORY RULE (CRITICAL):
+Once you call 'update_cart' for an item, it is permanently saved. DO NOT re-add old items in future turns! If they say "Yes" to fries, ONLY call 'update_cart' for the fries. NEVER call 'update_cart' for the main dish again.
 
-3. CONTINUING THE ORDER (After adding to cart):
-Every time you successfully use the 'update_cart' tool, your text response MUST confirm the addition in one short sentence and ask if they want anything else.
-Example: "הוספתי את ההמבורגר לעגלה. תרצו להזמין משהו נוסף?"
+BULK ORDER FAST-TRACK (CRITICAL):
+If the guest orders multiple items at once (e.g., "I want a burger, truffle fries, and a coke"), you must SKIP the upselling steps for the items they already provided! 
+- Call 'update_cart' for EACH item they mentioned (you can use the tool multiple times in one turn).
+- Jump straight to the next logical step. (e.g., If they ordered a main, side, AND drink, jump straight to Step 4 and ask if they want anything else or to send to the kitchen).
 
-4. ORDER SUMMARY & CONFIRMATION:
-If the user indicates they are done ordering (e.g., "לא, זה הכל", "No thanks"), you MUST summarize their entire current cart (read back the items and quantities) and ask for explicit permission to send it to the kitchen.
-Example: "מצוין. אז יש לנו 2 המבורגרים וקולה. לאשר ולשלוח את ההזמנה למטבח?"
+ANTI-SKIP RULE (CRITICAL):
+You are STRICTLY FORBIDDEN from asking about drinks until you have explicitly asked the guest if they want a side dish.
 
-5. SUBMISSION TO KITCHEN:
-Only use the 'submit_order' tool AFTER the user explicitly says "yes" to your summary. When triggered, confirm with: "ההזמנה נשלחה למטבח! בתאבון."
+STRICT 5-STEP ALGORITHM:s
+STEP 1 (Modifications): If they order a main dish (e.g., burger), ask ONLY about modifications (e.g., "No onion, extra cheese?"). DO NOT call update_cart yet.
+STEP 2 (Smart Side Upsell): When they reply with modifications, call 'update_cart' for the main dish. Look at the menu_items and pick ONE SPECIFIC side dish that pairs perfectly with their main. Your 'guest_reply' MUST confirm the food AND suggest that specific side.
+    -> Example: "Got it, a burger with extra cheese. Our Truffle Fries pair perfectly with that—would you like to add that to your order?"
+STEP 3 (The Drink Question): When they answer about the side (e.g., "Yes" or "No thanks"), call 'update_cart' for the side (if ordered). Your 'guest_reply' MUST confirm the side AND explicitly ask about drinks.
+    -> Example: "Perfect, added the fries. Would you like something to drink with your meal?"
+STEP 4 (The Kitchen Question): When they answer about the drink, call 'update_cart' for the drink (if ordered). Your 'guest_reply' MUST confirm the drink AND strictly ask if they want anything else or to send it.
+    -> Example: "Got it, one Coca-Cola zero. Would you like anything else, or should I send this to the kitchen?"
+STEP 5 (Submit): If they say "no" or "send it", call 'submit_order'. Confirm it was sent.
 
-6. PAYMENT & CHECKOUT:
-If the user asks for the bill, wants to pay, or says "חשבון בבקשה", trigger the 'go_to_payment' tool and say: "מיד מעביר אתכם למסך התשלום."
+CRITICAL RULE: EVERY SINGLE MESSAGE YOU SEND MUST END WITH A QUESTION MARK (?) UNTIL THE ORDER IS SENT TO THE KITCHEN. NEVER STOP ASKING QUESTIONS.
 
-Your goals:
-- Answer questions about dishes, ingredients, spice level, and dietary concerns honestly. If you are unsure, say so and suggest they ask the kitchen or manager.
-- Help the customer build an order that fits their party size, budget, and preferences. Offer sensible pairings or popular choices when it helps (upsell gently—never pushy).
-- Always ground recommendations in the menu data you are given: use exact item names and prices from that list.
-- When the customer wants to add, change quantity, or remove an item from their cart, you MUST call the update_cart tool with the correct item_id (UUID from the menu), quantity, and any special_requests (use an empty string if there are none).
-- Never invent menu items, prices, or IDs that are not in the provided menu JSON.
-- Keep replies concise on mobile; use short paragraphs or bullet lists when comparing options.
+LANGUAGE: Reply ONLY in the language the user used last.`;
 
-Strict rules:
-- Do not claim an item is available if the menu shows is_available: false; politely suggest alternatives.
-- Do not process payments or personal financial data; you only help with food and drink selection.
-- If asked for anything outside the restaurant (legal, medical, unrelated topics), decline briefly and return to the dining experience.
-
-CRITICAL: ALWAYS respond in the SAME LANGUAGE as the user's last message (Hebrew or English). When you trigger the 'update_cart' or 'submit_order' tools, your text response MUST be a single, extremely short, natural sentence confirming the action in the user's language (e.g., 'I added the burger. Ready to order?' or 'הוספתי לעגלה. לשלוח למטבח?'). NEVER output raw JSON, technical names, or logs in the conversation.`;
-
-/** Groq function-calling: cart updates from the model (schema is fixed; behavior is enforced in the client). */
 const GROQ_CHAT_TOOLS = [
   {
     type: "function",
     function: {
       name: "update_cart",
-      description:
-        "Update the guest's cart: add or change quantity for a menu item, or set quantity to 0 to remove. Use exact item_id values from the menu_items JSON supplied in the system message.",
+      description: "Update the guest's cart.",
       parameters: {
         type: "object",
         properties: {
           item_id: {
             type: "string",
-            description: "Primary key id of the menu_items row (UUID string).",
+            description: "Primary key id of the menu_items row.",
           },
           quantity: {
-            type: "number",
-            description: "How many of this item (0 removes the line).",
+            type: "integer",
+            description: "CRITICAL: Must be a pure mathematical NUMBER (e.g. 1), NEVER a string (e.g. '1'). How many to add.",
           },
           special_requests: {
             type: "string",
-            description:
-              "Allergies, preparation notes, or modifiers; use empty string if none.",
+            description: "Allergies, preparation notes, or modifiers; use empty string if none.",
           },
+          guest_reply: {
+            type: "string",
+            description: "CRITICAL: Your text response. THIS MUST END WITH A QUESTION MARK. 1. If adding a main, SUGGEST A SPECIFIC SIDE (DO NOT ask about drinks yet!). 2. If adding a side, ask about drinks. 3. If adding a drink, ask to send to kitchen. IF YOU DO NOT END WITH A QUESTION, YOU FAILED.",
+          }
         },
-        required: ["item_id", "quantity", "special_requests"],
+        required: ["item_id", "quantity", "special_requests", "guest_reply"],
       },
     },
   },
@@ -95,17 +90,20 @@ const GROQ_CHAT_TOOLS = [
     type: "function",
     function: {
       name: "submit_order",
-      description:
-        "Call when the guest explicitly confirms they want to send the current cart to the kitchen (same as tapping checkout in the app). No parameters.",
+      description: "Sends the entire current cart to the kitchen. Call this ONLY in Step 5.",
       parameters: {
         type: "object",
-        properties: {},
-        required: [],
+        properties: {
+          guest_reply: {
+            type: "string",
+            description: "CRITICAL: Your confirmation message to the guest that the order is being sent.",
+          }
+        },
+        required: ["guest_reply"],
       },
     },
   },
 ];
-
 /** Groq retired `llama3-70b-8192`; see https://console.groq.com/docs/deprecations */
 const GROQ_CHAT_MODEL = "llama-3.3-70b-versatile";
 
@@ -129,6 +127,41 @@ if (!supabaseUrl || !supabaseKey) {
 }
 
 const supabase = createClient(supabaseUrl ?? "", supabaseKey ?? "");
+
+/** Supabase JS sometimes hits transient TLS/network drops (ECONNRESET). */
+function isTransientSupabaseNetworkError(error) {
+  if (!error || typeof error !== "object") return false;
+  const msg = String(error.message ?? "");
+  const details = String(error.details ?? "");
+  return (
+    msg.includes("fetch failed") ||
+    details.includes("ECONNRESET") ||
+    details.includes("ETIMEDOUT") ||
+    details.includes("EPIPE")
+  );
+}
+
+async function fetchMenuItemsWithRetry() {
+  const maxAttempts = 4;
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const { data, error } = await supabase.from("menu_items").select("*");
+    if (!error) {
+      return { data: data ?? [], error: null };
+    }
+    lastError = error;
+    if (!isTransientSupabaseNetworkError(error) || attempt === maxAttempts) {
+      break;
+    }
+    const delayMs = 350 * attempt;
+    console.warn(
+      `[api/chat] menu_items transient network error (attempt ${attempt}/${maxAttempts}), retry in ${delayMs}ms:`,
+      error.message
+    );
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return { data: null, error: lastError };
+}
 
 const groqApiKey = process.env.GROQ_API_KEY;
 if (!groqApiKey) {
@@ -233,13 +266,16 @@ app.post("/api/chat", async (req, res) => {
               : JSON.stringify(m.content),
       }));
 
-    const { data: menuRows, error: menuError } = await supabase
-      .from("menu_items")
-      .select("*");
+    const { data: menuRows, error: menuError } =
+      await fetchMenuItemsWithRetry();
 
     if (menuError) {
       console.error("[api/chat] Supabase menu_items error:", menuError);
-      return res.status(500).json({ error: menuError.message });
+      return res.status(503).json({
+        code: "menu_unavailable",
+        error:
+          "Could not load the menu (database connection dropped). Please try again in a few seconds.",
+      });
     }
 
     const menuJson = JSON.stringify(menuRows ?? [], null, 2);
@@ -305,6 +341,8 @@ ${menuJson}`;
     );
 
     if (hasClientTools) {
+      console.log("=== AI'S EXACT TOOL CALLS ===");
+      console.log(JSON.stringify(tool_calls, null, 2));
       return res.json({
         text,
         tool_calls,
@@ -317,6 +355,15 @@ ${menuJson}`;
 
     return res.json({ text: null, tool_calls });
   } catch (err) {
+    const status = err?.status;
+    if (status === 429) {
+      console.warn("[api/chat] Groq rate limit (429):", err?.message ?? err);
+      return res.status(429).json({
+        code: "rate_limit",
+        error:
+          "The AI waiter is temporarily unavailable due to usage limits. Please try again in a little while.",
+      });
+    }
     console.error("[api/chat] Unhandled error:", err?.message ?? err);
     if (err?.stack) {
       console.error("[api/chat] Stack:", err.stack);

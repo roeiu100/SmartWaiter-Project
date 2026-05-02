@@ -22,6 +22,7 @@ import {
   type ParsedToolCall,
 } from "../services/chatApi";
 import { useSimulatorStore } from "../simulator/simulatorStore";
+import { useChatWaiterStore } from "../store/chatWaiterStore";
 import { premium } from "../theme/premium";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Chat">;
@@ -42,6 +43,43 @@ function lastUserLanguage(messages: ChatMessage[]): "he" | "en" {
   return "en";
 }
 
+function isRateLimitedChatError(message: string): boolean {
+  return /429|rate limit|rate_limit|tokens per day|usage limit|temporarily unavailable/i.test(
+    message
+  );
+}
+
+function friendlyChatFailureMessage(raw: string, lang: "he" | "en"): string {
+  if (isRateLimitedChatError(raw)) {
+    return lang === "he"
+      ? "המלצר הווירטואלי לא זמין רגע בגלל מגבלת שימוש. נסו שוב בעוד כמה דקות."
+      : "The AI waiter is briefly unavailable due to a usage limit. Please try again in a few minutes.";
+  }
+  if (raw.length > 220) {
+    return lang === "he"
+      ? "לא הצלחנו להתחבר לשירות המלצר. נסו שוב."
+      : "We couldn't reach the waiter service. Please try again.";
+  }
+  return raw;
+}
+
+/** User said they don't want more items (not e.g. "no tomatoes"). */
+function userDeclinesFurtherItems(text: string): boolean {
+  const raw = text.trim();
+  if (!raw) return false;
+  const t = raw.toLowerCase();
+  if (
+    /^(no|nope|no thanks|no thank you|nothing else|that'?s all|that is all|all set|i'?m good|we'?re good)\.?$/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  if (/^לא(\s+תודה)?\.?$/i.test(raw)) return true;
+  if (/^(זהו|סיימתי)\.?$/i.test(raw)) return true;
+  return false;
+}
+
 type SubmitOutcome = "ok" | "empty" | "error" | null;
 
 async function submitOrderToKitchenSimulator(): Promise<SubmitOutcome> {
@@ -58,13 +96,8 @@ export function ChatScreen(_props: Props) {
   const insets = useSafeAreaInsets();
   const listRef = useRef<FlatList<ChatMessage>>(null);
 
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      role: "assistant",
-      content:
-        "Hi — I'm your AI waiter. Ask about the menu or tell me what you'd like to order.",
-    },
-  ]);
+  const messages = useChatWaiterStore((s) => s.messages);
+  const appendMessage = useChatWaiterStore((s) => s.appendMessage);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
@@ -146,13 +179,13 @@ export function ChatScreen(_props: Props) {
 
     setErrorBanner(null);
     const userMsg: ChatMessage = { role: "user", content: trimmed };
-    const historyForApi: ChatMessage[] = [...messages, userMsg];
+    appendMessage(userMsg);
+    const historyForApi = useChatWaiterStore.getState().messages;
 
-    setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setSending(true);
 
-    const lang = lastUserLanguage([...messages, userMsg]);
+    const lang = lastUserLanguage(historyForApi);
 
     try {
       const { assistantText, tool_calls } = await sendChatToApi(historyForApi);
@@ -163,21 +196,27 @@ export function ChatScreen(_props: Props) {
         submitOutcome = r.submitOutcome;
       }
 
-      const hadUpdateCart = tool_calls.some(
-        (t) => normToolName(t.name) === "update_cart"
-      );
       const hadSubmitOrder = tool_calls.some(
         (t) =>
           normToolName(t.name) === "submit_order" || t.name === "submit_order"
       );
 
       let combined = (assistantText && assistantText.trim()) || "";
-
-      if (!combined && hadUpdateCart) {
-        combined =
-          lang === "he"
-            ? "עדכנתי את העגלה."
-            : "I've updated your cart.";
+      // Take the LAST tool call that carries a valid guest_reply (don't mutate tool_calls).
+      const toolWithGuestReply = [...tool_calls]
+        .reverse()
+        .find(
+          (t) =>
+            t.arguments &&
+            typeof t.arguments.guest_reply === "string" &&
+            t.arguments.guest_reply.trim().length > 0
+        );
+      if (
+        toolWithGuestReply &&
+        toolWithGuestReply.arguments &&
+        typeof toolWithGuestReply.arguments.guest_reply === "string"
+      ) {
+        combined = toolWithGuestReply.arguments.guest_reply.trim();
       }
 
       if (hadSubmitOrder) {
@@ -202,36 +241,31 @@ export function ChatScreen(_props: Props) {
         }
       }
 
-      if (!combined) {
-        combined =
-          lang === "he"
-            ? "לא קיבלתי תשובה. נסו שוב."
-            : "I didn't get a reply. Please try again.";
+      if (!String(combined).trim()) {
+        combined = userDeclinesFurtherItems(trimmed)
+          ? lang === "he"
+            ? "לא הצלחתי לסגור את ההזמנה מההודעה הזו. כתבו ״שלח למטבח״ כדי לאשר, או שלחו שוב ״לא, תודה״."
+            : "I couldn’t finalize from that reply. Type **send to kitchen** to confirm, or send **No** / **No thanks** again."
+          : lang === "he"
+            ? "לא הבנתי לגמרי. תוכלו לפרט או לנסח שוב?"
+            : "I didn't quite catch that. Could you say it another way?";
       }
 
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: combined },
-      ]);
+      appendMessage({ role: "assistant", content: combined });
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Something went wrong.";
-      setErrorBanner(msg);
+      const raw = e instanceof Error ? e.message : "Something went wrong.";
+      const friendly = friendlyChatFailureMessage(raw, lang);
+      setErrorBanner(friendly);
       console.error("[Chat] send failed:", e);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content:
-            lang === "he"
-              ? `מצטערים — לא הצלחתי להתחבר לשירות. (${msg})`
-              : `Sorry — I couldn't reach the waiter service. (${msg})`,
-        },
-      ]);
+      appendMessage({
+        role: "assistant",
+        content: friendly,
+      });
     } finally {
       setSending(false);
     }
-  }, [input, messages, sending, applyToolCalls]);
-
+  }, [input, sending, applyToolCalls, appendMessage]);
+    
   const renderItem = useCallback(
     ({ item: m }: { item: ChatMessage }) => {
       const isUser = m.role === "user";
