@@ -5,6 +5,7 @@ import { GuestMenuScreen } from "../screens/GuestMenuScreen";
 import { KitchenDashboardScreen } from "../screens/KitchenDashboardScreen";
 import { RunnerDashboardScreen } from "../screens/RunnerDashboardScreen";
 import { ManagerScreen } from "../screens/ManagerScreen";
+import { ManagerAnalyticsScreen } from "../screens/ManagerAnalyticsScreen";
 import { ChatScreen } from "../screens/ChatScreen";
 import { premium } from "../theme/premium";
 
@@ -14,6 +15,7 @@ export type RootStackParamList = {
   Kitchen: undefined;
   Runner: undefined;
   Manager: undefined;
+  ManagerAnalytics: undefined;
   Chat: undefined;
 };
 
@@ -69,6 +71,11 @@ export function AppNavigator() {
           name="Manager"
           component={ManagerScreen}
           options={{ title: "Manager" }}
+        />
+        <Stack.Screen
+          name="ManagerAnalytics"
+          component={ManagerAnalyticsScreen}
+          options={{ title: "Analytics" }}
         />
         <Stack.Screen
           name="Chat"

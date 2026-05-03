@@ -6,6 +6,7 @@ import {
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -13,11 +14,13 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { io, type Socket } from "socket.io-client";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { RootStackParamList } from "../navigation/AppNavigator";
-import { fetchMenuFromApi } from "../services/menuApi";
+import { MENU_API_BASE } from "../services/menuApi";
 import {
   sendChatToApi,
+  type ChatCartLine,
   type ChatMessage,
   type ParsedToolCall,
 } from "../services/chatApi";
@@ -82,14 +85,14 @@ function userDeclinesFurtherItems(text: string): boolean {
 
 type SubmitOutcome = "ok" | "empty" | "error" | null;
 
-async function submitOrderToKitchenSimulator(): Promise<SubmitOutcome> {
-  try {
-    const menu = await fetchMenuFromApi();
-    return useSimulatorStore.getState().submitGuestCartToKitchen(menu);
-  } catch (e) {
-    console.error("[Chat] submitGuestCartToKitchen / fetch menu failed:", e);
-    return "error";
-  }
+function cartLinesFromStore(): ChatCartLine[] {
+  const qty = useSimulatorStore.getState().guestCartQuantities;
+  return Object.entries(qty)
+    .filter(([, q]) => (Number(q) || 0) > 0)
+    .map(([menu_item_id, quantity]) => ({
+      menu_item_id,
+      quantity: Number(quantity),
+    }));
 }
 
 export function ChatScreen(_props: Props) {
@@ -98,9 +101,107 @@ export function ChatScreen(_props: Props) {
 
   const messages = useChatWaiterStore((s) => s.messages);
   const appendMessage = useChatWaiterStore((s) => s.appendMessage);
+  const guestTableId = useSimulatorStore((s) => s.guestTableId);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [managerModalVisible, setManagerModalVisible] = useState(false);
+  const [managerReason, setManagerReason] = useState("");
+  const socketRef = useRef<Socket | null>(null);
+
+  useEffect(() => {
+    const baseUrl =
+      (MENU_API_BASE ?? process.env.EXPO_PUBLIC_API_URL ?? "").toString().trim();
+    if (!baseUrl) {
+      console.warn(
+        "[Chat] MENU_API_BASE / EXPO_PUBLIC_API_URL not set; manager socket disabled"
+      );
+      return;
+    }
+
+    console.log("[Chat] connecting manager socket to", baseUrl);
+    const socket = io(baseUrl, {
+      transports: ["websocket", "polling"],
+      reconnection: true,
+    });
+    socketRef.current = socket;
+
+    const onConnect = () => {
+      console.log("[Chat] manager socket connected:", socket.id);
+    };
+    const onConnectError = (err: Error) => {
+      console.warn("[Chat] manager socket connect_error:", err?.message ?? err);
+    };
+    const onDisconnect = (reason: string) => {
+      console.log("[Chat] manager socket disconnected:", reason);
+    };
+    const onManagerError = (payload: { error?: string } | undefined) => {
+      console.warn("[Chat] manager_error received:", payload);
+      Alert.alert(
+        "Manager unavailable",
+        "Manager requests are currently disabled for this table."
+      );
+    };
+
+    socket.on("connect", onConnect);
+    socket.on("connect_error", onConnectError);
+    socket.on("disconnect", onDisconnect);
+    socket.on("manager_error", onManagerError);
+
+    return () => {
+      socket.off("connect", onConnect);
+      socket.off("connect_error", onConnectError);
+      socket.off("disconnect", onDisconnect);
+      socket.off("manager_error", onManagerError);
+      socket.disconnect();
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
+    };
+  }, []);
+
+  const onSubmitManagerCall = useCallback(() => {
+    const reason = managerReason.trim();
+    if (!reason) {
+      Alert.alert("Reason required", "Please enter a reason for calling the manager.");
+      return;
+    }
+    const socket = socketRef.current;
+    if (!socket) {
+      Alert.alert(
+        "Unavailable",
+        "Manager service is not connected. Please try again shortly."
+      );
+      return;
+    }
+    const table = (guestTableId ?? "").trim() || "T?";
+    // Socket.io buffers emits until the underlying connection is ready,
+    // so we don't need to block on socket.connected here. We pass an ACK
+    // callback so we only show the "Manager notified" alert when the server
+    // confirms success. When the table is blocked, the server instead
+    // emits `manager_error` (handled separately) and the ack returns
+    // { ok: false }, so we skip the success alert and avoid a double popup.
+    socket.emit(
+      "call_manager",
+      { table, reason },
+      (response: { ok?: boolean; code?: string } | undefined) => {
+        console.log("[Chat] call_manager ack:", response);
+        if (response && response.ok === true) {
+          Alert.alert(
+            "Manager notified",
+            "A manager has been alerted and will come to your table."
+          );
+        }
+      }
+    );
+    console.log("[Chat] emitted call_manager", {
+      table,
+      reason,
+      connected: socket.connected,
+    });
+    setManagerReason("");
+    setManagerModalVisible(false);
+  }, [managerReason, guestTableId]);
 
   useEffect(() => {
     listRef.current?.scrollToEnd({ animated: true });
@@ -118,59 +219,30 @@ export function ChatScreen(_props: Props) {
     return () => show.remove();
   }, []);
 
-  const applyToolCalls = useCallback(async (tool_calls: ParsedToolCall[]) => {
+  const applyToolCalls = useCallback((tool_calls: ParsedToolCall[]) => {
     for (const tc of tool_calls) {
+      if (normToolName(tc.name) === "request_runner") {
+        // Side effect (emitting the runner alert) is handled by the server
+        // in POST /api/chat so the Runner tablet sees it immediately. We
+        // just log it here for debugging.
+        console.log("[Chat] Tool call (request_runner):", tc);
+        continue;
+      }
       if (normToolName(tc.name) !== "update_cart") continue;
 
       console.log("[Chat] Tool call (update_cart):", tc);
-
       if (!tc.arguments || typeof tc.arguments !== "object") continue;
 
-      const { item_id, quantity, special_requests } = tc.arguments as {
+      const { item_id, quantity } = tc.arguments as {
         item_id?: unknown;
         quantity?: unknown;
-        special_requests?: unknown;
       };
-      console.log("[Chat] update_cart payload:", {
-        item_id,
-        quantity,
-        special_requests,
-      });
       const id = item_id != null ? String(item_id) : "";
       const qty = Number(quantity);
       if (id && Number.isFinite(qty)) {
         useSimulatorStore.getState().setGuestCartLine(id, qty);
       }
     }
-
-    let submitOutcome: SubmitOutcome = null;
-    const wantsSubmit = tool_calls.some(
-      (tc) =>
-        normToolName(tc.name) === "submit_order" ||
-        tc.name === "submit_order"
-    );
-
-    if (wantsSubmit) {
-      console.log(
-        "[Chat] submit_order detected — invoking submitGuestCartToKitchen (same as Guest checkout)",
-        JSON.stringify(tool_calls.map((t) => ({ name: t.name, args: t.arguments })))
-      );
-      submitOutcome = await submitOrderToKitchenSimulator();
-
-      if (submitOutcome === "ok") {
-        Alert.alert("Success", "Order sent to kitchen!");
-        useSimulatorStore.getState().clearGuestCart();
-      } else if (submitOutcome === "empty") {
-        Alert.alert(
-          "Cannot send",
-          "Your cart is empty or has no available items to send."
-        );
-      } else {
-        Alert.alert("Error", "Could not send the order. Please try again.");
-      }
-    }
-
-    return { submitOutcome };
   }, []);
 
   const onSend = useCallback(async () => {
@@ -188,18 +260,34 @@ export function ChatScreen(_props: Props) {
     const lang = lastUserLanguage(historyForApi);
 
     try {
-      const { assistantText, tool_calls } = await sendChatToApi(historyForApi);
+      const cart = cartLinesFromStore();
+      const { assistantText, tool_calls, order, order_error } =
+        await sendChatToApi(historyForApi, guestTableId, cart);
 
-      let submitOutcome: SubmitOutcome = null;
       if (tool_calls.length > 0) {
-        const r = await applyToolCalls(tool_calls);
-        submitOutcome = r.submitOutcome;
+        applyToolCalls(tool_calls);
       }
 
       const hadSubmitOrder = tool_calls.some(
         (t) =>
           normToolName(t.name) === "submit_order" || t.name === "submit_order"
       );
+
+      let submitOutcome: SubmitOutcome = null;
+      if (hadSubmitOrder) {
+        if (order) {
+          submitOutcome = "ok";
+          useSimulatorStore.getState().clearGuestCart();
+        } else if (order_error && /empty|no valid|no available/i.test(order_error.message)) {
+          submitOutcome = "empty";
+        } else if (order_error) {
+          submitOutcome = "error";
+          console.warn("[Chat] submit_order server rejected:", order_error);
+        } else {
+          // Tool fired but no cart was sent — treat as empty.
+          submitOutcome = "empty";
+        }
+      }
 
       let combined = (assistantText && assistantText.trim()) || "";
       // Take the LAST tool call that carries a valid guest_reply (don't mutate tool_calls).
@@ -264,7 +352,7 @@ export function ChatScreen(_props: Props) {
     } finally {
       setSending(false);
     }
-  }, [input, sending, applyToolCalls, appendMessage]);
+  }, [input, sending, applyToolCalls, appendMessage, guestTableId]);
     
   const renderItem = useCallback(
     ({ item: m }: { item: ChatMessage }) => {
@@ -303,6 +391,20 @@ export function ChatScreen(_props: Props) {
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={90}
     >
+      <View style={styles.topBar}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Call the manager"
+          onPress={() => setManagerModalVisible(true)}
+          style={({ pressed }) => [
+            styles.callManagerBtn,
+            pressed && styles.callManagerBtnPressed,
+          ]}
+        >
+          <Text style={styles.callManagerBtnLabel}>Call Manager</Text>
+        </Pressable>
+      </View>
+
       <FlatList
         ref={listRef}
         style={styles.list}
@@ -359,6 +461,63 @@ export function ChatScreen(_props: Props) {
             </Pressable>
           </View>
         </View>
+
+        <Modal
+          visible={managerModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setManagerModalVisible(false)}
+        >
+          <View style={styles.modalBackdrop}>
+            <View style={styles.modalCard}>
+              <Text style={styles.modalTitle}>Call Manager</Text>
+              <Text style={styles.modalSubtitle}>
+                Reason for calling the manager
+              </Text>
+              <TextInput
+                style={styles.modalInput}
+                value={managerReason}
+                onChangeText={setManagerReason}
+                placeholder="e.g. wrong order, billing question…"
+                placeholderTextColor={premium.mutedLight}
+                multiline
+                maxLength={400}
+                autoFocus
+              />
+              <View style={styles.modalActions}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel"
+                  onPress={() => {
+                    setManagerReason("");
+                    setManagerModalVisible(false);
+                  }}
+                  style={({ pressed }) => [
+                    styles.modalBtn,
+                    styles.modalBtnSecondary,
+                    pressed && styles.modalBtnPressed,
+                  ]}
+                >
+                  <Text style={styles.modalBtnSecondaryLabel}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Submit manager request"
+                  onPress={onSubmitManagerCall}
+                  disabled={!managerReason.trim()}
+                  style={({ pressed }) => [
+                    styles.modalBtn,
+                    styles.modalBtnPrimary,
+                    !managerReason.trim() && styles.modalBtnDisabled,
+                    pressed && managerReason.trim() && styles.modalBtnPressed,
+                  ]}
+                >
+                  <Text style={styles.modalBtnPrimaryLabel}>Submit</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -467,5 +626,103 @@ const styles = StyleSheet.create({
     color: premium.onNav,
     fontWeight: "700",
     fontSize: 16,
+  },
+  topBar: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 6,
+    backgroundColor: premium.screenDeep,
+  },
+  callManagerBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 18,
+    backgroundColor: premium.navBar,
+  },
+  callManagerBtnPressed: {
+    opacity: 0.85,
+  },
+  callManagerBtnLabel: {
+    color: premium.onNav,
+    fontWeight: "700",
+    fontSize: 13,
+    letterSpacing: 0.3,
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.45)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 24,
+  },
+  modalCard: {
+    width: "100%",
+    maxWidth: 420,
+    backgroundColor: premium.ivory,
+    borderRadius: 16,
+    padding: 18,
+    gap: 10,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: premium.charcoal,
+  },
+  modalSubtitle: {
+    fontSize: 13,
+    color: premium.charcoal,
+    opacity: 0.7,
+  },
+  modalInput: {
+    minHeight: 80,
+    borderRadius: 12,
+    padding: 12,
+    fontSize: 15,
+    color: premium.charcoal,
+    backgroundColor: premium.ivoryDark,
+    borderWidth: 1,
+    borderColor: premium.border,
+    textAlignVertical: "top",
+  },
+  modalActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 10,
+    marginTop: 4,
+  },
+  modalBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 22,
+    minWidth: 92,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modalBtnPrimary: {
+    backgroundColor: premium.navBar,
+  },
+  modalBtnSecondary: {
+    backgroundColor: premium.ivoryDark,
+    borderWidth: 1,
+    borderColor: premium.border,
+  },
+  modalBtnDisabled: {
+    opacity: 0.45,
+  },
+  modalBtnPressed: {
+    opacity: 0.88,
+  },
+  modalBtnPrimaryLabel: {
+    color: premium.onNav,
+    fontWeight: "700",
+    fontSize: 15,
+  },
+  modalBtnSecondaryLabel: {
+    color: premium.charcoal,
+    fontWeight: "600",
+    fontSize: 15,
   },
 });

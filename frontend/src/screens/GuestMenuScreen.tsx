@@ -4,9 +4,9 @@ import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
   Alert,
+  FlatList,
   Platform,
   Pressable,
-  SectionList,
   StyleSheet,
   Text,
   TextInput,
@@ -15,11 +15,38 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { RootStackParamList } from "../navigation/AppNavigator";
 import { fetchMenuFromApi, MENU_API_BASE } from "../services/menuApi";
+import { submitOrder } from "../services/orderApi";
 import type { MenuItemRow } from "../types/database";
 import { useSimulatorStore, type CartLine } from "../simulator/simulatorStore";
 import { premium } from "../theme/premium";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Guest">;
+
+/**
+ * Which category shows first on the picker. Lower rank = earlier.
+ * Anything not in the list falls to the end, then sorts alphabetically
+ * so new categories added by the manager just appear at the bottom.
+ */
+function categoryRank(name: string): number {
+  const n = name.toLowerCase().trim();
+  if (n === "food") return 0;
+  if (n === "desserts" || n === "dessert") return 1;
+  if (n === "drinks" || n === "drink") return 2;
+  return 3;
+}
+
+function titleCase(name: string): string {
+  const s = name.trim();
+  if (!s) return s;
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
+interface CategoryEntry {
+  key: string;
+  label: string;
+  count: number;
+  inCart: number;
+}
 
 export function GuestMenuScreen(_props: Props) {
   const insets = useSafeAreaInsets();
@@ -27,13 +54,15 @@ export function GuestMenuScreen(_props: Props) {
   const setGuestTableId = useSimulatorStore((s) => s.setGuestTableId);
   const guestCartQuantities = useSimulatorStore((s) => s.guestCartQuantities);
   const setGuestCartLine = useSimulatorStore((s) => s.setGuestCartLine);
-  const submitGuestCartToKitchen = useSimulatorStore(
-    (s) => s.submitGuestCartToKitchen
-  );
+  const clearGuestCart = useSimulatorStore((s) => s.clearGuestCart);
+  const [submitting, setSubmitting] = useState(false);
 
   const [menuItems, setMenuItems] = useState<MenuItemRow[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  /** Currently-open category key, or null to show the category picker. */
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
 
   const loadMenu = useCallback(async (opts?: { silent?: boolean }) => {
     const silent = opts?.silent === true;
@@ -68,7 +97,6 @@ export function GuestMenuScreen(_props: Props) {
     }
   }, []);
 
-  // loadMenu is stable (empty deps); this runs when the Guest screen mounts.
   useEffect(() => {
     void loadMenu();
   }, [loadMenu]);
@@ -81,17 +109,13 @@ export function GuestMenuScreen(_props: Props) {
       );
       return;
     }
-
     const socket = io(baseUrl, {
       transports: ["websocket", "polling"],
     });
-
     const onMenuUpdated = () => {
       void loadMenu({ silent: true });
     };
-
     socket.on("menu_updated", onMenuUpdated);
-
     return () => {
       socket.off("menu_updated", onMenuUpdated);
       socket.disconnect();
@@ -127,7 +151,7 @@ export function GuestMenuScreen(_props: Props) {
     [setGuestCartLine]
   );
 
-  const onSubmit = () => {
+  const onSubmit = useCallback(async () => {
     if (lines.length === 0) {
       Alert.alert("Cart empty", "Add at least one item.");
       return;
@@ -136,19 +160,46 @@ export function GuestMenuScreen(_props: Props) {
       Alert.alert("Menu not ready", "Wait for the menu to load.");
       return;
     }
-    const outcome = submitGuestCartToKitchen(menuItems);
-    if (outcome === "empty") {
-      Alert.alert(
-        "Cart empty",
-        "No available items in the cart to send to the kitchen."
-      );
+    const tableId = (guestTableId ?? "").trim();
+    if (!tableId) {
+      Alert.alert("Table required", "Enter your table id before ordering.");
       return;
     }
-    Alert.alert("Order sent", "Kitchen will see this order in the simulator.");
-    // REPLACE: POST /orders with table_id + lines; show server validation errors.
-  };
+    setSubmitting(true);
+    try {
+      const availableIds = new Set(
+        menuItems.filter((m) => m.is_available).map((m) => m.id)
+      );
+      const apiLines = lines
+        .filter((l) => availableIds.has(l.menuItemId))
+        .map((l) => ({
+          menu_item_id: l.menuItemId,
+          quantity: l.quantity,
+        }));
+      if (apiLines.length === 0) {
+        Alert.alert(
+          "Cart empty",
+          "No available items in the cart to send to the kitchen."
+        );
+        return;
+      }
+      await submitOrder(tableId, apiLines);
+      clearGuestCart();
+      setSelectedCategory(null);
+      Alert.alert("Order sent", "The kitchen is preparing your order.");
+    } catch (err) {
+      console.error("[GuestMenu] submitOrder failed:", err);
+      Alert.alert(
+        "Could not send order",
+        err instanceof Error ? err.message : "Please try again."
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }, [lines, menuItems, guestTableId, clearGuestCart]);
 
-  const sections = useMemo(() => {
+  /** All available categories, sorted (food, desserts, drinks, …others). */
+  const categories: CategoryEntry[] = useMemo(() => {
     const byCat = new Map<string, MenuItemRow[]>();
     for (const m of menuItems) {
       if (!m.is_available) continue;
@@ -156,8 +207,120 @@ export function GuestMenuScreen(_props: Props) {
       arr.push(m);
       byCat.set(m.category, arr);
     }
-    return [...byCat.entries()].map(([title, data]) => ({ title, data }));
-  }, [menuItems]);
+    const entries: CategoryEntry[] = [];
+    for (const [key, items] of byCat.entries()) {
+      const inCart = items.reduce(
+        (sum, it) => sum + (guestCartQuantities[it.id] ?? 0),
+        0
+      );
+      entries.push({
+        key,
+        label: titleCase(key),
+        count: items.length,
+        inCart,
+      });
+    }
+    entries.sort((a, b) => {
+      const ra = categoryRank(a.key);
+      const rb = categoryRank(b.key);
+      if (ra !== rb) return ra - rb;
+      return a.label.localeCompare(b.label);
+    });
+    return entries;
+  }, [menuItems, guestCartQuantities]);
+
+  /** When a category disappears (manager toggled off the last item), fall back to picker. */
+  useEffect(() => {
+    if (selectedCategory == null) return;
+    if (!categories.some((c) => c.key === selectedCategory)) {
+      setSelectedCategory(null);
+    }
+  }, [categories, selectedCategory]);
+
+  const itemsInCategory: MenuItemRow[] = useMemo(() => {
+    if (!selectedCategory) return [];
+    return menuItems.filter(
+      (m) => m.is_available && m.category === selectedCategory
+    );
+  }, [menuItems, selectedCategory]);
+
+  const renderCategoryCard = useCallback(
+    ({ item }: { item: CategoryEntry }) => (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Open ${item.label} section`}
+        onPress={() => setSelectedCategory(item.key)}
+        style={({ pressed }) => [
+          styles.categoryCard,
+          pressed && styles.categoryCardPressed,
+        ]}
+      >
+        <View style={styles.categoryTextCol}>
+          <Text style={styles.categoryName}>{item.label}</Text>
+          <Text style={styles.categoryMeta}>
+            {item.count} {item.count === 1 ? "item" : "items"}
+            {item.inCart > 0 ? ` • ${item.inCart} in cart` : ""}
+          </Text>
+        </View>
+        <Text style={styles.categoryChevron}>›</Text>
+      </Pressable>
+    ),
+    []
+  );
+
+  const renderItemCard = useCallback(
+    ({ item }: { item: MenuItemRow }) => {
+      const q = guestCartQuantities[item.id] ?? 0;
+      return (
+        <View style={styles.card}>
+          <View style={styles.cardRow}>
+            <View style={styles.rowTextCol}>
+              <View style={styles.rowTitleRow}>
+                <Text style={styles.itemName} numberOfLines={2}>
+                  {item.name}
+                </Text>
+                <Text style={styles.itemPrice}>${item.price.toFixed(2)}</Text>
+              </View>
+              {item.description ? (
+                <Text style={styles.itemDesc}>{item.description}</Text>
+              ) : null}
+            </View>
+            <View style={styles.stepper}>
+              <Pressable
+                onPress={() => bump(item.id, -1)}
+                style={({ pressed }) => [
+                  styles.stepBtn,
+                  q === 0 && styles.stepBtnDisabled,
+                  pressed && q > 0 && styles.stepBtnPressed,
+                ]}
+                hitSlop={8}
+                disabled={q === 0}
+              >
+                <Text style={styles.stepBtnText}>−</Text>
+              </Pressable>
+              <Text style={styles.qty}>{q}</Text>
+              <Pressable
+                onPress={() => bump(item.id, 1)}
+                style={({ pressed }) => [
+                  styles.stepBtn,
+                  styles.stepBtnPlus,
+                  pressed && styles.stepBtnPressed,
+                ]}
+                hitSlop={8}
+              >
+                <Text style={[styles.stepBtnText, styles.stepBtnTextPlus]}>
+                  +
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      );
+    },
+    [bump, guestCartQuantities]
+  );
+
+  const listPaddingBottom = 140 + insets.bottom;
 
   return (
     <View style={styles.root}>
@@ -188,92 +351,67 @@ export function GuestMenuScreen(_props: Props) {
         </View>
       ) : null}
 
-      <SectionList
-        style={styles.listFlex}
-        sections={sections}
-        keyExtractor={(item) => item.id}
-        showsVerticalScrollIndicator={false}
-        stickySectionHeadersEnabled={false}
-        contentContainerStyle={[
-          styles.listContent,
-          { paddingBottom: 140 + insets.bottom },
-        ]}
-        ListHeaderComponent={
-          <View style={styles.listHero}>
-            <Text style={styles.menuKicker}>CHEF&apos;S MENU</Text>
-            <Text style={styles.menuHead}>Selections</Text>
-            <View style={styles.menuRule} />
-            <Text style={styles.menuSub}>
-              Tap + to add dishes to your order
-            </Text>
-          </View>
-        }
-        ListEmptyComponent={
-          <Text style={styles.emptyMenu}>No items available.</Text>
-        }
-        renderSectionHeader={({ section: { title } }) => (
-          <Text style={styles.sectionTitle}>{title}</Text>
-        )}
-        renderItem={({ item }) => {
-          const q = guestCartQuantities[item.id] ?? 0;
-          return (
-            <View style={styles.card}>
-              <View style={styles.cardRow}>
-                <View style={styles.rowTextCol}>
-                  <View style={styles.rowTitleRow}>
-                    <Text style={styles.itemName} numberOfLines={2}>
-                      {item.name}
-                    </Text>
-                    <Text style={styles.itemPrice}>
-                      ${item.price.toFixed(2)}
-                    </Text>
-                  </View>
-                  {item.description ? (
-                    <Text style={styles.itemDesc}>{item.description}</Text>
-                  ) : null}
-                </View>
-                <View style={styles.stepper}>
-                  <Pressable
-                    onPress={() => bump(item.id, -1)}
-                    style={({ pressed }) => [
-                      styles.stepBtn,
-                      q === 0 && styles.stepBtnDisabled,
-                      pressed && q > 0 && styles.stepBtnPressed,
-                    ]}
-                    hitSlop={8}
-                    disabled={q === 0}
-                  >
-                    <Text style={styles.stepBtnText}>−</Text>
-                  </Pressable>
-                  <Text style={styles.qty}>{q}</Text>
-                  <Pressable
-                    onPress={() => bump(item.id, 1)}
-                    style={({ pressed }) => [
-                      styles.stepBtn,
-                      styles.stepBtnPlus,
-                      pressed && styles.stepBtnPressed,
-                    ]}
-                    hitSlop={8}
-                  >
-                    <Text
-                      style={[styles.stepBtnText, styles.stepBtnTextPlus]}
-                    >
-                      +
-                    </Text>
-                  </Pressable>
-                </View>
-              </View>
+      {selectedCategory == null ? (
+        <FlatList
+          style={styles.listFlex}
+          data={categories}
+          keyExtractor={(c) => c.key}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={[
+            styles.listContent,
+            { paddingBottom: listPaddingBottom },
+          ]}
+          ListHeaderComponent={
+            <View style={styles.listHero}>
+              <Text style={styles.menuKicker}>CHEF&apos;S MENU</Text>
             </View>
-          );
-        }}
-      />
+          }
+          ListEmptyComponent={
+            !isLoading ? (
+              <Text style={styles.emptyMenu}>No items available.</Text>
+            ) : null
+          }
+          renderItem={renderCategoryCard}
+        />
+      ) : (
+        <FlatList
+          style={styles.listFlex}
+          data={itemsInCategory}
+          keyExtractor={(m) => m.id}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={[
+            styles.listContent,
+            { paddingBottom: listPaddingBottom },
+          ]}
+          ListHeaderComponent={
+            <View style={styles.categoryHeader}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Back to all categories"
+                onPress={() => setSelectedCategory(null)}
+                style={({ pressed }) => [
+                  styles.backBtn,
+                  pressed && styles.backBtnPressed,
+                ]}
+              >
+                <Text style={styles.backBtnLabel}>‹ All categories</Text>
+              </Pressable>
+              <Text style={styles.categoryHeaderTitle}>
+                {titleCase(selectedCategory)}
+              </Text>
+            </View>
+          }
+          ListEmptyComponent={
+            <Text style={styles.emptyMenu}>No items in this section.</Text>
+          }
+          renderItem={renderItemCard}
+        />
+      )}
 
       <View
         style={[
           styles.footer,
-          {
-            paddingBottom: Math.max(insets.bottom, 16),
-          },
+          { paddingBottom: Math.max(insets.bottom, 16) },
         ]}
       >
         <View style={styles.footerRow}>
@@ -290,18 +428,23 @@ export function GuestMenuScreen(_props: Props) {
         <Pressable
           style={({ pressed }) => [
             styles.primary,
-            (lines.length === 0 || isLoading || error != null) &&
+            (lines.length === 0 || isLoading || error != null || submitting) &&
               styles.primaryDisabled,
             pressed &&
               lines.length > 0 &&
               !isLoading &&
               error == null &&
+              !submitting &&
               styles.primaryPressed,
           ]}
-          onPress={onSubmit}
-          disabled={lines.length === 0 || isLoading || error != null}
+          onPress={() => void onSubmit()}
+          disabled={
+            lines.length === 0 || isLoading || error != null || submitting
+          }
         >
-          <Text style={styles.primaryText}>Place order</Text>
+          <Text style={styles.primaryText}>
+            {submitting ? "Sending…" : "Place order"}
+          </Text>
         </Pressable>
       </View>
     </View>
@@ -369,26 +512,70 @@ const styles = StyleSheet.create({
     letterSpacing: 2.5,
     marginBottom: 8,
   },
-  menuHead: {
-    fontSize: 32,
+
+  // Category picker
+  categoryCard: {
+    backgroundColor: premium.ivory,
+    borderRadius: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: premium.border,
+    borderLeftWidth: 4,
+    borderLeftColor: premium.gold,
+    paddingVertical: 22,
+    paddingHorizontal: 20,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    ...CARD_ELEVATION,
+  },
+  categoryCardPressed: { opacity: 0.92 },
+  categoryTextCol: { flex: 1, minWidth: 0 },
+  categoryName: {
+    fontSize: 24,
     fontWeight: "800",
     color: premium.charcoal,
-    letterSpacing: -1,
+    letterSpacing: -0.6,
   },
-  menuRule: {
-    width: 48,
-    height: 3,
-    backgroundColor: premium.gold,
-    borderRadius: 2,
-    marginTop: 12,
-    marginBottom: 10,
+  categoryMeta: {
+    marginTop: 4,
+    fontSize: 13,
+    color: premium.muted,
+    fontWeight: "600",
   },
-  menuSub: {
-    fontSize: 14,
-    color: premium.charcoalSoft,
-    lineHeight: 20,
+  categoryChevron: {
+    fontSize: 32,
+    fontWeight: "700",
+    color: premium.goldDark,
+    marginLeft: 8,
+    marginTop: -4,
+  },
+
+  // Inside-category header (back link + section title)
+  categoryHeader: {
     marginBottom: 12,
+    gap: 10,
   },
+  backBtn: {
+    alignSelf: "flex-start",
+    paddingVertical: 4,
+    paddingHorizontal: 2,
+  },
+  backBtnPressed: { opacity: 0.7 },
+  backBtnLabel: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: premium.goldDark,
+    letterSpacing: 0.3,
+  },
+  categoryHeaderTitle: {
+    fontSize: 28,
+    fontWeight: "800",
+    color: premium.charcoal,
+    letterSpacing: -0.6,
+  },
+
   tablePanel: {
     marginHorizontal: 20,
     marginTop: 8,
@@ -420,15 +607,8 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     paddingVertical: 4,
   },
-  sectionTitle: {
-    fontSize: 11,
-    fontWeight: "800",
-    color: premium.muted,
-    marginTop: 16,
-    marginBottom: 12,
-    textTransform: "uppercase",
-    letterSpacing: 2,
-  },
+
+  // Item cards (inside a category)
   card: {
     backgroundColor: premium.ivory,
     borderRadius: 16,
@@ -499,6 +679,7 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: premium.charcoal,
   },
+
   footer: {
     position: "absolute",
     left: 0,
