@@ -41,6 +41,8 @@ TOOL SURVIVAL RULE (CRITICAL FOR PREVENTING CRASHES):
 1. If the guest declines an upsell (e.g., "No thanks" to a drink or side), YOU MUST NOT CALL 'update_cart'. Just reply with plain conversational text asking the next question. NEVER use quantity: 0 just to skip an item!
 2. Only use 'update_cart' with quantity: 0 if the guest explicitly asks to REMOVE an item they already ordered in the past.
 
+CRITICAL TOOL RULE: When calling the 'update_cart' tool, your arguments MUST be a single JSON object (e.g., \`{"item_id": "...", "quantity": 1}\`). NEVER wrap the arguments in an array \`[]\`.
+
 MEMORY RULE (CRITICAL):
 Once you call 'update_cart' for an item, it is permanently saved. DO NOT re-add old items in future turns! If they say "Yes" to fries, ONLY call 'update_cart' for the fries. NEVER call 'update_cart' for the main dish again.
 
@@ -114,26 +116,31 @@ function buildGroqChatTools(runnerOptionsString) {
     type: "function",
     function: {
       name: "update_cart",
-      description: "Update the guest's cart.",
+      description:
+        "Add, update quantity, or remove one menu line on the guest's cart. Pass exactly ONE tool call with ONE flat JSON object as arguments (keys: item_id, quantity, special_requests, guest_reply). NEVER pass an array of objects or wrap the arguments in [].",
       parameters: {
         type: "object",
+        additionalProperties: false,
         properties: {
           item_id: {
             type: "string",
-            description: "Primary key id of the menu_items row.",
+            description:
+              "Primary key UUID/id of the menu_items row from the menu JSON. Must be a string, not an array.",
           },
           quantity: {
-            type: "integer",
-            description: "CRITICAL: Must be a pure mathematical NUMBER (e.g. 1), NEVER a string (e.g. '1'). How many to add.",
+            type: "number",
+            description:
+              "CRITICAL: Must be a JSON number (e.g. 1 or 2), never a string. Use 0 only when the guest explicitly asks to remove an item already on the cart.",
           },
           special_requests: {
             type: "string",
-            description: "Allergies, preparation notes, or modifiers; use empty string if none.",
+            description:
+              "Allergies, preparation notes, or modifiers. Use an empty string \"\" when there are none.",
           },
           guest_reply: {
             type: "string",
             description: "CRITICAL: Your conversational text reply to the guest. Match the 6-step flow defined in the system prompt: after a main → confirm and suggest ONE specific side (do NOT ask about drinks yet); after a side → confirm and ask about drinks; after a drink → confirm and ask ONLY if they want anything else (do NOT offer to send to the kitchen here — Step 5 is the summary step, not this one). End with a natural follow-up question — a real question sentence, never a bare '?' and never a '?' tacked onto a non-question.",
-          }
+          },
         },
         required: ["item_id", "quantity", "special_requests", "guest_reply"],
       },
