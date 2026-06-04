@@ -11,16 +11,26 @@ import type { UUID } from "../types/database";
  * nature: the guest's draft cart and the table id they're sitting at.
  */
 
+export interface GuestCartLineState {
+  quantity: number;
+  notes?: string;
+}
+
 export interface CartLine {
   menuItemId: UUID;
   quantity: number;
+  notes?: string;
 }
 
 interface SimulatorState {
-  /** Shared guest cart (menu screen + AI chat) — quantities by menu_item id. */
-  guestCartQuantities: Record<string, number>;
+  /** Shared guest cart (menu screen + AI chat) — lines by menu_item id. */
+  guestCart: Record<string, GuestCartLineState>;
   guestTableId: string;
-  setGuestCartLine: (menuItemId: UUID, quantity: number) => void;
+  setGuestCartLine: (
+    menuItemId: UUID,
+    quantity: number,
+    notes?: string
+  ) => void;
   setGuestTableId: (tableId: string) => void;
   clearGuestCart: () => void;
   /** Utility for tests / demo: resets cart + table to defaults. */
@@ -28,21 +38,35 @@ interface SimulatorState {
 }
 
 export const useSimulatorStore = create<SimulatorState>((set) => ({
-  guestCartQuantities: {},
+  guestCart: {},
   guestTableId: "T12",
 
-  setGuestCartLine: (menuItemId, quantity) => {
+  setGuestCartLine: (menuItemId, quantity, notes) => {
     set((s) => {
-      const next = { ...s.guestCartQuantities };
-      if (quantity <= 0) delete next[menuItemId];
-      else next[menuItemId] = quantity;
-      return { guestCartQuantities: next };
+      const next = { ...s.guestCart };
+      if (quantity <= 0) {
+        delete next[menuItemId];
+        return { guestCart: next };
+      }
+      const prev = next[menuItemId];
+      let nextNotes: string | undefined;
+      if (notes !== undefined) {
+        const trimmed = notes.trim();
+        nextNotes = trimmed.length > 0 ? trimmed : undefined;
+      } else {
+        nextNotes = prev?.notes;
+      }
+      next[menuItemId] = {
+        quantity,
+        ...(nextNotes ? { notes: nextNotes } : {}),
+      };
+      return { guestCart: next };
     });
   },
 
   setGuestTableId: (tableId) => set({ guestTableId: tableId }),
 
-  clearGuestCart: () => set({ guestCartQuantities: {} }),
+  clearGuestCart: () => set({ guestCart: {} }),
 
-  resetSimulator: () => set({ guestCartQuantities: {}, guestTableId: "T12" }),
+  resetSimulator: () => set({ guestCart: {}, guestTableId: "T12" }),
 }));

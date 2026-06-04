@@ -1303,11 +1303,12 @@ const styles = StyleSheet.create({
   },
   lineDim: { color: "#A8A29E" },
   lineNotes: {
-    marginTop: 1,
+    marginTop: 2,
     fontSize: 9,
-    lineHeight: 11,
-    color: "#44403C",
+    lineHeight: 12,
+    color: premium.kitchen,
     fontStyle: "italic",
+    fontWeight: "700",
   },
   lineStatusPending: {
     marginTop: 1,

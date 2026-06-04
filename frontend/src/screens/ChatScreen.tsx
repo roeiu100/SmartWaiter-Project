@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
@@ -9,6 +9,7 @@ import {
   Modal,
   Platform,
   Pressable,
+  SectionList,
   StyleSheet,
   Text,
   TextInput,
@@ -17,7 +18,8 @@ import {
 import { io, type Socket } from "socket.io-client";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { RootStackParamList } from "../navigation/AppNavigator";
-import { MENU_API_BASE } from "../services/menuApi";
+import { fetchMenuFromApi, MENU_API_BASE } from "../services/menuApi";
+import type { MenuItemRow } from "../types/database";
 import {
   sendChatToApi,
   type ChatCartLine,
@@ -86,13 +88,70 @@ function userDeclinesFurtherItems(text: string): boolean {
 type SubmitOutcome = "ok" | "empty" | "error" | null;
 
 function cartLinesFromStore(): ChatCartLine[] {
-  const qty = useSimulatorStore.getState().guestCartQuantities;
-  return Object.entries(qty)
-    .filter(([, q]) => (Number(q) || 0) > 0)
-    .map(([menu_item_id, quantity]) => ({
-      menu_item_id,
-      quantity: Number(quantity),
-    }));
+  const cart = useSimulatorStore.getState().guestCart;
+  return Object.entries(cart)
+    .filter(([, line]) => (Number(line.quantity) || 0) > 0)
+    .map(([menu_item_id, line]) => {
+      const notes = (line.notes ?? "").trim();
+      return {
+        menu_item_id,
+        quantity: Number(line.quantity),
+        ...(notes ? { notes } : {}),
+      };
+    });
+}
+
+function categoryRank(name: string): number {
+  const n = name.toLowerCase().trim();
+  if (n === "starters" || n === "starter" || n === "appetizers") return 0;
+  if (n === "food" || n === "mains" || n === "main") return 1;
+  if (n === "desserts" || n === "dessert") return 2;
+  if (n === "drinks" || n === "drink") return 3;
+  return 4;
+}
+
+function titleCaseCategory(name: string): string {
+  const s = name.trim();
+  if (!s) return "General";
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
+function formatMenuPrice(price: number): string {
+  return `$${price.toFixed(2)}`;
+}
+
+type MenuSection = {
+  title: string;
+  data: MenuItemRow[];
+};
+
+function buildMenuSections(items: MenuItemRow[]): MenuSection[] {
+  const byCat = new Map<string, MenuItemRow[]>();
+  for (const item of items) {
+    if (!item.is_available) continue;
+    const key = item.category.trim() || "General";
+    const arr = byCat.get(key) ?? [];
+    arr.push(item);
+    byCat.set(key, arr);
+  }
+
+  const sections: MenuSection[] = [];
+  for (const [key, data] of byCat.entries()) {
+    data.sort((a, b) => a.name.localeCompare(b.name));
+    sections.push({
+      title: titleCaseCategory(key),
+      data,
+    });
+  }
+
+  sections.sort((a, b) => {
+    const ra = categoryRank(a.title);
+    const rb = categoryRank(b.title);
+    if (ra !== rb) return ra - rb;
+    return a.title.localeCompare(b.title);
+  });
+
+  return sections;
 }
 
 export function ChatScreen(_props: Props) {
@@ -107,7 +166,35 @@ export function ChatScreen(_props: Props) {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [managerModalVisible, setManagerModalVisible] = useState(false);
   const [managerReason, setManagerReason] = useState("");
+  const [menuModalVisible, setMenuModalVisible] = useState(false);
+  const [menuItems, setMenuItems] = useState<MenuItemRow[]>([]);
+  const [menuLoading, setMenuLoading] = useState(false);
+  const [menuError, setMenuError] = useState<string | null>(null);
   const socketRef = useRef<Socket | null>(null);
+
+  const menuSections = useMemo(() => buildMenuSections(menuItems), [menuItems]);
+
+  const loadMenu = useCallback(async () => {
+    setMenuLoading(true);
+    setMenuError(null);
+    try {
+      const data = await fetchMenuFromApi();
+      setMenuItems(data);
+    } catch (err) {
+      console.warn("[Chat] fetchMenuFromApi failed:", err);
+      setMenuError(
+        err instanceof Error ? err.message : "Could not load the menu"
+      );
+      setMenuItems([]);
+    } finally {
+      setMenuLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!menuModalVisible) return;
+    void loadMenu();
+  }, [menuModalVisible, loadMenu]);
 
   useEffect(() => {
     const baseUrl =
@@ -233,14 +320,17 @@ export function ChatScreen(_props: Props) {
       console.log("[Chat] Tool call (update_cart):", tc);
       if (!tc.arguments || typeof tc.arguments !== "object") continue;
 
-      const { item_id, quantity } = tc.arguments as {
+      const { item_id, quantity, special_requests } = tc.arguments as {
         item_id?: unknown;
         quantity?: unknown;
+        special_requests?: unknown;
       };
       const id = item_id != null ? String(item_id) : "";
       const qty = Number(quantity);
+      const notes =
+        typeof special_requests === "string" ? special_requests : undefined;
       if (id && Number.isFinite(qty)) {
-        useSimulatorStore.getState().setGuestCartLine(id, qty);
+        useSimulatorStore.getState().setGuestCartLine(id, qty, notes);
       }
     }
   }, []);
@@ -354,6 +444,30 @@ export function ChatScreen(_props: Props) {
     }
   }, [input, sending, applyToolCalls, appendMessage, guestTableId]);
     
+  const renderMenuItem = useCallback(
+    ({ item }: { item: MenuItemRow }) => (
+      <View style={styles.menuItemCard}>
+        <View style={styles.menuItemHeader}>
+          <Text style={styles.menuItemName}>{item.name}</Text>
+          <Text style={styles.menuItemPrice}>{formatMenuPrice(item.price)}</Text>
+        </View>
+        {item.description ? (
+          <Text style={styles.menuItemDesc}>{item.description}</Text>
+        ) : null}
+      </View>
+    ),
+    []
+  );
+
+  const renderMenuSectionHeader = useCallback(
+    ({ section }: { section: MenuSection }) => (
+      <View style={styles.menuSectionHeader}>
+        <Text style={styles.menuSectionTitle}>{section.title}</Text>
+      </View>
+    ),
+    []
+  );
+
   const renderItem = useCallback(
     ({ item: m }: { item: ChatMessage }) => {
       const isUser = m.role === "user";
@@ -392,6 +506,17 @@ export function ChatScreen(_props: Props) {
       keyboardVerticalOffset={90}
     >
       <View style={styles.topBar}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="View the restaurant menu"
+          onPress={() => setMenuModalVisible(true)}
+          style={({ pressed }) => [
+            styles.viewMenuBtn,
+            pressed && styles.viewMenuBtnPressed,
+          ]}
+        >
+          <Text style={styles.viewMenuBtnLabel}>View Menu</Text>
+        </Pressable>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Call the manager"
@@ -461,6 +586,76 @@ export function ChatScreen(_props: Props) {
             </Pressable>
           </View>
         </View>
+
+        <Modal
+          visible={menuModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setMenuModalVisible(false)}
+        >
+          <View style={styles.modalBackdrop}>
+            <View style={styles.menuModalCard}>
+              <View style={styles.menuModalHeader}>
+                <View style={styles.menuModalHeaderText}>
+                  <Text style={styles.menuModalTitle}>Our Menu</Text>
+                  <Text style={styles.menuModalSubtitle}>
+                    Browse dishes and drinks while you chat with your waiter
+                  </Text>
+                </View>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Close menu"
+                  onPress={() => setMenuModalVisible(false)}
+                  style={({ pressed }) => [
+                    styles.menuCloseBtn,
+                    pressed && styles.menuCloseBtnPressed,
+                  ]}
+                >
+                  <Text style={styles.menuCloseBtnLabel}>Close</Text>
+                </Pressable>
+              </View>
+
+              {menuLoading ? (
+                <View style={styles.menuModalBodyCentered}>
+                  <ActivityIndicator color={premium.gold} size="large" />
+                  <Text style={styles.menuModalHint}>Loading menu…</Text>
+                </View>
+              ) : menuError ? (
+                <View style={styles.menuModalBodyCentered}>
+                  <Text style={styles.menuModalError}>{menuError}</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry loading menu"
+                    onPress={() => void loadMenu()}
+                    style={({ pressed }) => [
+                      styles.menuRetryBtn,
+                      pressed && styles.menuRetryBtnPressed,
+                    ]}
+                  >
+                    <Text style={styles.menuRetryBtnLabel}>Try again</Text>
+                  </Pressable>
+                </View>
+              ) : menuSections.length === 0 ? (
+                <View style={styles.menuModalBodyCentered}>
+                  <Text style={styles.menuModalHint}>
+                    No items are available right now.
+                  </Text>
+                </View>
+              ) : (
+                <SectionList
+                  sections={menuSections}
+                  keyExtractor={(item) => item.id}
+                  renderItem={renderMenuItem}
+                  renderSectionHeader={renderMenuSectionHeader}
+                  stickySectionHeadersEnabled
+                  showsVerticalScrollIndicator
+                  contentContainerStyle={styles.menuListContent}
+                  style={styles.menuList}
+                />
+              )}
+            </View>
+          </View>
+        </Modal>
 
         <Modal
           visible={managerModalVisible}
@@ -631,10 +826,28 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "flex-end",
     alignItems: "center",
+    gap: 10,
     paddingHorizontal: 12,
     paddingTop: 10,
     paddingBottom: 6,
     backgroundColor: premium.screenDeep,
+  },
+  viewMenuBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 18,
+    backgroundColor: premium.goldMuted,
+    borderWidth: 1,
+    borderColor: premium.borderGold,
+  },
+  viewMenuBtnPressed: {
+    opacity: 0.88,
+  },
+  viewMenuBtnLabel: {
+    color: premium.goldDark,
+    fontWeight: "800",
+    fontSize: 13,
+    letterSpacing: 0.3,
   },
   callManagerBtn: {
     paddingHorizontal: 14,
@@ -665,6 +878,147 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 18,
     gap: 10,
+  },
+  menuModalCard: {
+    width: "100%",
+    maxWidth: 480,
+    maxHeight: "80%",
+    backgroundColor: premium.ivory,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: premium.border,
+    overflow: "hidden",
+    flexDirection: "column",
+  },
+  menuModalHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: premium.border,
+    backgroundColor: premium.ivory,
+  },
+  menuModalHeaderText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  menuModalTitle: {
+    fontSize: 20,
+    fontWeight: "800",
+    color: premium.charcoal,
+    letterSpacing: -0.3,
+  },
+  menuModalSubtitle: {
+    marginTop: 4,
+    fontSize: 13,
+    lineHeight: 18,
+    color: premium.charcoalSoft,
+  },
+  menuCloseBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 18,
+    backgroundColor: premium.navBar,
+    minWidth: 72,
+    alignItems: "center",
+  },
+  menuCloseBtnPressed: {
+    opacity: 0.88,
+  },
+  menuCloseBtnLabel: {
+    color: premium.onNav,
+    fontWeight: "700",
+    fontSize: 14,
+  },
+  menuList: {
+    flexShrink: 1,
+    flexGrow: 1,
+    minHeight: 120,
+  },
+  menuListContent: {
+    paddingHorizontal: 14,
+    paddingBottom: 18,
+  },
+  menuModalBodyCentered: {
+    paddingVertical: 36,
+    paddingHorizontal: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 12,
+  },
+  menuModalHint: {
+    fontSize: 14,
+    color: premium.muted,
+    textAlign: "center",
+  },
+  menuModalError: {
+    fontSize: 14,
+    color: "#991B1B",
+    textAlign: "center",
+    lineHeight: 20,
+  },
+  menuRetryBtn: {
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 20,
+    backgroundColor: premium.gold,
+  },
+  menuRetryBtnPressed: {
+    opacity: 0.9,
+  },
+  menuRetryBtnLabel: {
+    color: premium.charcoal,
+    fontWeight: "700",
+    fontSize: 14,
+  },
+  menuSectionHeader: {
+    paddingTop: 14,
+    paddingBottom: 8,
+    backgroundColor: premium.ivory,
+  },
+  menuSectionTitle: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: premium.goldDark,
+    letterSpacing: 1.2,
+    textTransform: "uppercase",
+  },
+  menuItemCard: {
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    marginBottom: 8,
+    borderRadius: 12,
+    backgroundColor: premium.ivoryDark,
+    borderWidth: 1,
+    borderColor: premium.border,
+  },
+  menuItemHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  menuItemName: {
+    flex: 1,
+    fontSize: 16,
+    fontWeight: "700",
+    color: premium.charcoal,
+    lineHeight: 22,
+  },
+  menuItemPrice: {
+    fontSize: 16,
+    fontWeight: "800",
+    color: premium.goldDark,
+  },
+  menuItemDesc: {
+    marginTop: 6,
+    fontSize: 14,
+    lineHeight: 20,
+    color: premium.charcoalSoft,
   },
   modalTitle: {
     fontSize: 18,

@@ -52,7 +52,7 @@ export function GuestMenuScreen(_props: Props) {
   const insets = useSafeAreaInsets();
   const guestTableId = useSimulatorStore((s) => s.guestTableId);
   const setGuestTableId = useSimulatorStore((s) => s.setGuestTableId);
-  const guestCartQuantities = useSimulatorStore((s) => s.guestCartQuantities);
+  const guestCart = useSimulatorStore((s) => s.guestCart);
   const setGuestCartLine = useSimulatorStore((s) => s.setGuestCartLine);
   const clearGuestCart = useSimulatorStore((s) => s.clearGuestCart);
   const [submitting, setSubmitting] = useState(false);
@@ -123,10 +123,14 @@ export function GuestMenuScreen(_props: Props) {
   }, [loadMenu]);
 
   const lines: CartLine[] = useMemo(() => {
-    return Object.entries(guestCartQuantities)
-      .filter(([, q]) => q > 0)
-      .map(([menuItemId, quantity]) => ({ menuItemId, quantity }));
-  }, [guestCartQuantities]);
+    return Object.entries(guestCart)
+      .filter(([, line]) => line.quantity > 0)
+      .map(([menuItemId, line]) => ({
+        menuItemId,
+        quantity: line.quantity,
+        ...(line.notes ? { notes: line.notes } : {}),
+      }));
+  }, [guestCart]);
 
   const total = useMemo(() => {
     let sum = 0;
@@ -145,7 +149,7 @@ export function GuestMenuScreen(_props: Props) {
   const bump = useCallback(
     (id: string, delta: number) => {
       const prev =
-        useSimulatorStore.getState().guestCartQuantities[id] ?? 0;
+        useSimulatorStore.getState().guestCart[id]?.quantity ?? 0;
       setGuestCartLine(id, Math.max(0, prev + delta));
     },
     [setGuestCartLine]
@@ -175,6 +179,7 @@ export function GuestMenuScreen(_props: Props) {
         .map((l) => ({
           menu_item_id: l.menuItemId,
           quantity: l.quantity,
+          ...(l.notes ? { notes: l.notes } : {}),
         }));
       if (apiLines.length === 0) {
         Alert.alert(
@@ -210,7 +215,7 @@ export function GuestMenuScreen(_props: Props) {
     const entries: CategoryEntry[] = [];
     for (const [key, items] of byCat.entries()) {
       const inCart = items.reduce(
-        (sum, it) => sum + (guestCartQuantities[it.id] ?? 0),
+        (sum, it) => sum + (guestCart[it.id]?.quantity ?? 0),
         0
       );
       entries.push({
@@ -227,7 +232,7 @@ export function GuestMenuScreen(_props: Props) {
       return a.label.localeCompare(b.label);
     });
     return entries;
-  }, [menuItems, guestCartQuantities]);
+  }, [menuItems, guestCart]);
 
   /** When a category disappears (manager toggled off the last item), fall back to picker. */
   useEffect(() => {
@@ -270,7 +275,7 @@ export function GuestMenuScreen(_props: Props) {
 
   const renderItemCard = useCallback(
     ({ item }: { item: MenuItemRow }) => {
-      const q = guestCartQuantities[item.id] ?? 0;
+      const q = guestCart[item.id]?.quantity ?? 0;
       return (
         <View style={styles.card}>
           <View style={styles.cardRow}>
@@ -317,7 +322,7 @@ export function GuestMenuScreen(_props: Props) {
         </View>
       );
     },
-    [bump, guestCartQuantities]
+    [bump, guestCart]
   );
 
   const listPaddingBottom = 140 + insets.bottom;

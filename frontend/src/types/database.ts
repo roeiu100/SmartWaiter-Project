@@ -5,6 +5,17 @@
 
 export type UUID = string;
 
+/**
+ * jsonb column on menu_items — known fields plus extension keys from the manager UI.
+ * `ai_questions` drives waiter modification prompts; omit it when the dish has no choices.
+ */
+export type MenuItemMetadata = {
+  allergens?: string[];
+  ingredients?: string[];
+  /** e.g. "Ask how they want the burger cooked (rare/med/well) and if they want onions." */
+  ai_questions?: string;
+} & Record<string, unknown>;
+
 /** Table: menu_items */
 export interface MenuItemRow {
   id: UUID;
@@ -14,8 +25,7 @@ export interface MenuItemRow {
   is_available: boolean;
   /** Optional in DB — add column if missing */
   description?: string | null;
-  /** jsonb column — currently used for `{ allergens: string[] }`. */
-  metadata?: Record<string, unknown> | null;
+  metadata?: MenuItemMetadata | null;
 }
 
 /** Payload shape accepted by POST /api/menu when a manager creates a dish. */
@@ -25,12 +35,8 @@ export interface MenuItemCreatePayload {
   price: number;
   category: string;
   is_available?: boolean;
-  /**
-   * Arbitrary jsonb payload. Currently we store `{ allergens?: string[];
-   * ingredients?: string[] }`, but the column is free-form so we accept any
-   * object here. Pass `null` to clear the column (used by PATCH for edits).
-   */
-  metadata?: Record<string, unknown> | null;
+  /** Pass `null` to clear the column (used by PATCH for edits). */
+  metadata?: MenuItemMetadata | null;
 }
 
 /** Table: orders — order-level status drives kitchen/runner workflows */
