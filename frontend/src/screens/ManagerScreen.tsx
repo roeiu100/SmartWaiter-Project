@@ -17,7 +17,7 @@ import {
   ToastAndroid,
   View,
 } from "react-native";
-import type { RootStackParamList } from "../navigation/AppNavigator";
+import type { ManagerStackParamList } from "../navigation/types";
 import {
   createMenuItem,
   createRunnerOption,
@@ -144,7 +144,7 @@ function showToast(message: string) {
   }
 }
 
-type Props = NativeStackScreenProps<RootStackParamList, "Manager">;
+type Props = NativeStackScreenProps<ManagerStackParamList, "ManagerHome">;
 
 /**
  * Menu API base is shared with the guest menu (`MENU_API_BASE` in `menuApi.ts`).

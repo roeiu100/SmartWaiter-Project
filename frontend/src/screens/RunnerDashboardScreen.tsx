@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   Alert,
   Dimensions,
@@ -12,7 +11,6 @@ import {
   View,
 } from "react-native";
 import { io, type Socket } from "socket.io-client";
-import type { RootStackParamList } from "../navigation/AppNavigator";
 import { MENU_API_BASE } from "../services/menuApi";
 import {
   fetchActiveOrders,
@@ -23,8 +21,6 @@ import {
   type ActiveOrderItemStatus,
 } from "../services/orderApi";
 import { premium } from "../theme/premium";
-
-type Props = NativeStackScreenProps<RootStackParamList, "Runner">;
 
 interface RunnerAlert {
   id: number;
@@ -580,7 +576,7 @@ function RunnerOrderDetailModal({
   );
 }
 
-export function RunnerDashboardScreen(_props: Props) {
+export function RunnerDashboardScreen() {
   const { width, height } = useWindowDimensions();
   const cardWidth = useMemo(
     () => computeKdsCardWidth(Dimensions.get("window").width),

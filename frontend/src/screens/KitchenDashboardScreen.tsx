@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   Alert,
   Dimensions,
@@ -12,7 +11,6 @@ import {
   View,
 } from "react-native";
 import { io, type Socket } from "socket.io-client";
-import type { RootStackParamList } from "../navigation/AppNavigator";
 import { MENU_API_BASE } from "../services/menuApi";
 import {
   fetchActiveOrders,
@@ -23,8 +21,6 @@ import {
   type ActiveOrderItemStatus,
 } from "../services/orderApi";
 import { premium } from "../theme/premium";
-
-type Props = NativeStackScreenProps<RootStackParamList, "Kitchen">;
 
 /** After 15 minutes the card turns pink to alert chefs. */
 const STALE_AFTER_MS = 15 * 60 * 1000;
@@ -554,7 +550,7 @@ function OrderDetailModal({
   );
 }
 
-export function KitchenDashboardScreen(_props: Props) {
+export function KitchenDashboardScreen() {
   const { width, height } = useWindowDimensions();
   const cardWidth = useMemo(
     () => computeKdsCardWidth(Dimensions.get("window").width),

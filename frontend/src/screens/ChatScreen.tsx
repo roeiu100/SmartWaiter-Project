@@ -17,7 +17,7 @@ import {
 } from "react-native";
 import { io, type Socket } from "socket.io-client";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import type { RootStackParamList } from "../navigation/AppNavigator";
+import type { CustomerStackParamList } from "../navigation/types";
 import { fetchMenuFromApi, MENU_API_BASE } from "../services/menuApi";
 import type { MenuItemRow } from "../types/database";
 import {
@@ -30,7 +30,7 @@ import { useSimulatorStore } from "../simulator/simulatorStore";
 import { useChatWaiterStore } from "../store/chatWaiterStore";
 import { premium } from "../theme/premium";
 
-type Props = NativeStackScreenProps<RootStackParamList, "Chat">;
+type Props = NativeStackScreenProps<CustomerStackParamList, "Chat">;
 
 function normToolName(name: string | null | undefined): string {
   return String(name ?? "")

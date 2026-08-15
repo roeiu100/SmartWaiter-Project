@@ -17,7 +17,7 @@ import {
   type barDataItem,
   type lineDataItem,
 } from "react-native-gifted-charts";
-import type { RootStackParamList } from "../navigation/AppNavigator";
+import type { ManagerStackParamList } from "../navigation/types";
 import {
   analyticsApi,
   type AnalyticsRange,
@@ -29,7 +29,7 @@ import {
 } from "../services/analyticsApi";
 import { premium } from "../theme/premium";
 
-type Props = NativeStackScreenProps<RootStackParamList, "ManagerAnalytics">;
+type Props = NativeStackScreenProps<ManagerStackParamList, "ManagerAnalytics">;
 
 const AUTO_REFRESH_MS = 60_000;
 

@@ -1,87 +1,46 @@
-import { NavigationContainer } from "@react-navigation/native";
+import * as Linking from "expo-linking";
+import {
+  NavigationContainer,
+  type LinkingOptions,
+} from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { RoleSelectionScreen } from "../screens/RoleSelectionScreen";
-import { GuestMenuScreen } from "../screens/GuestMenuScreen";
-import { KitchenDashboardScreen } from "../screens/KitchenDashboardScreen";
-import { RunnerDashboardScreen } from "../screens/RunnerDashboardScreen";
-import { ManagerScreen } from "../screens/ManagerScreen";
-import { ManagerAnalyticsScreen } from "../screens/ManagerAnalyticsScreen";
-import { ChatScreen } from "../screens/ChatScreen";
-import { premium } from "../theme/premium";
-
-export type RootStackParamList = {
-  RoleSelection: undefined;
-  Guest: undefined;
-  Kitchen: undefined;
-  Runner: undefined;
-  Manager: undefined;
-  ManagerAnalytics: undefined;
-  Chat: undefined;
-};
+import { CustomerNavigator } from "./CustomerNavigator";
+import { StaffNavigator } from "./StaffNavigator";
+import type { RootStackParamList } from "./types";
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
-const darkHeader = {
-  headerStyle: { backgroundColor: premium.navBar },
-  headerTintColor: premium.navAccent,
-  headerTitleStyle: {
-    fontWeight: "700" as const,
-    fontSize: 17,
-    color: premium.onNav,
-    letterSpacing: 0.2,
+/**
+ * A `smartwaiter://table/5` (or `exp://.../--/table/5` in Expo Go) link opens
+ * the app straight into CustomerFlow > Guest with `tableId: "5"` in the
+ * route params — see the effect in GuestMenuScreen that pins it into
+ * `simulatorStore`. Any URL that does NOT match `table/:tableId` (including
+ * just opening the app normally) falls through to the default
+ * `initialRouteName="Staff"` below, landing on the PIN Auth Gate.
+ */
+const linking: LinkingOptions<RootStackParamList> = {
+  prefixes: [Linking.createURL("/"), "smartwaiter://"],
+  config: {
+    screens: {
+      Customer: {
+        screens: {
+          Guest: "table/:tableId",
+        },
+      },
+      Staff: "staff",
+    },
   },
-  headerShadowVisible: false,
-  headerBackTitleVisible: false,
 };
 
 export function AppNavigator() {
   return (
-    <NavigationContainer>
+    <NavigationContainer linking={linking}>
       <Stack.Navigator
-        initialRouteName="RoleSelection"
-        screenOptions={{
-          ...darkHeader,
-          contentStyle: { backgroundColor: premium.screen },
-        }}
+        initialRouteName="Staff"
+        screenOptions={{ headerShown: false }}
       >
-        <Stack.Screen
-          name="RoleSelection"
-          component={RoleSelectionScreen}
-          options={{
-            title: "",
-            headerShown: false,
-          }}
-        />
-        <Stack.Screen
-          name="Guest"
-          component={GuestMenuScreen}
-          options={{ title: "Order" }}
-        />
-        <Stack.Screen
-          name="Kitchen"
-          component={KitchenDashboardScreen}
-          options={{ title: "Kitchen" }}
-        />
-        <Stack.Screen
-          name="Runner"
-          component={RunnerDashboardScreen}
-          options={{ title: "Runner" }}
-        />
-        <Stack.Screen
-          name="Manager"
-          component={ManagerScreen}
-          options={{ title: "Manager" }}
-        />
-        <Stack.Screen
-          name="ManagerAnalytics"
-          component={ManagerAnalyticsScreen}
-          options={{ title: "Analytics" }}
-        />
-        <Stack.Screen
-          name="Chat"
-          component={ChatScreen}
-          options={{ title: "AI Waiter" }}
-        />
+        <Stack.Screen name="Customer" component={CustomerNavigator} />
+        <Stack.Screen name="Staff" component={StaffNavigator} />
       </Stack.Navigator>
     </NavigationContainer>
   );

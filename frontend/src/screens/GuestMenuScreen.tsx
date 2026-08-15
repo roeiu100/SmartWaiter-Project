@@ -13,14 +13,14 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import type { RootStackParamList } from "../navigation/AppNavigator";
+import type { CustomerStackParamList } from "../navigation/types";
 import { fetchMenuFromApi, MENU_API_BASE } from "../services/menuApi";
 import { submitOrder } from "../services/orderApi";
 import type { MenuItemRow } from "../types/database";
 import { useSimulatorStore, type CartLine } from "../simulator/simulatorStore";
 import { premium } from "../theme/premium";
 
-type Props = NativeStackScreenProps<RootStackParamList, "Guest">;
+type Props = NativeStackScreenProps<CustomerStackParamList, "Guest">;
 
 /**
  * Which category shows first on the picker. Lower rank = earlier.
@@ -48,10 +48,12 @@ interface CategoryEntry {
   inCart: number;
 }
 
-export function GuestMenuScreen(_props: Props) {
+export function GuestMenuScreen({ route }: Props) {
   const insets = useSafeAreaInsets();
   const guestTableId = useSimulatorStore((s) => s.guestTableId);
   const setGuestTableId = useSimulatorStore((s) => s.setGuestTableId);
+  const isGuestTableLocked = useSimulatorStore((s) => s.isGuestTableLocked);
+  const lockGuestTable = useSimulatorStore((s) => s.lockGuestTable);
   const guestCart = useSimulatorStore((s) => s.guestCart);
   const setGuestCartLine = useSimulatorStore((s) => s.setGuestCartLine);
   const clearGuestCart = useSimulatorStore((s) => s.clearGuestCart);
@@ -100,6 +102,14 @@ export function GuestMenuScreen(_props: Props) {
   useEffect(() => {
     void loadMenu();
   }, [loadMenu]);
+
+  /** Table id from the `table/:tableId` QR deep link — pins it so the guest can't edit it. */
+  useEffect(() => {
+    const tableId = route.params?.tableId?.trim();
+    if (tableId) {
+      lockGuestTable(tableId);
+    }
+  }, [route.params?.tableId, lockGuestTable]);
 
   useEffect(() => {
     const baseUrl = process.env.EXPO_PUBLIC_API_URL?.trim();
@@ -333,12 +343,16 @@ export function GuestMenuScreen(_props: Props) {
         <Text style={styles.tableLabel}>Table</Text>
         <TextInput
           value={guestTableId}
-          onChangeText={setGuestTableId}
+          onChangeText={isGuestTableLocked ? undefined : setGuestTableId}
+          editable={!isGuestTableLocked}
           placeholder="e.g. T12"
           placeholderTextColor={premium.mutedLight}
-          style={styles.input}
+          style={[styles.input, isGuestTableLocked && styles.inputLocked]}
           autoCapitalize="characters"
         />
+        {isGuestTableLocked ? (
+          <Text style={styles.lockedBadge}>🔒 QR</Text>
+        ) : null}
       </View>
 
       {isLoading ? (
@@ -611,6 +625,14 @@ const styles = StyleSheet.create({
     color: premium.charcoal,
     letterSpacing: 0.5,
     paddingVertical: 4,
+  },
+  inputLocked: {
+    color: premium.charcoalSoft,
+  },
+  lockedBadge: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: premium.muted,
   },
 
   // Item cards (inside a category)
