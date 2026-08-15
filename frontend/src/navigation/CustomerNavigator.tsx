@@ -1,7 +1,8 @@
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { Pressable, Text } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import { GuestMenuScreen } from "../screens/GuestMenuScreen";
 import { ChatScreen } from "../screens/ChatScreen";
+import { BillScreen } from "../screens/BillScreen";
 import { premium } from "../theme/premium";
 import type { CustomerStackParamList } from "./types";
 
@@ -19,48 +20,85 @@ const darkHeader = {
   headerShadowVisible: false,
 };
 
+function HeaderNavButton({
+  label,
+  onPress,
+}: {
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      onPress={onPress}
+      hitSlop={8}
+    >
+      <Text style={{ color: premium.navAccent, fontWeight: "700", fontSize: 13 }}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
 /**
- * Guest-facing flow only: table ordering + AI waiter chat. Has no route to
- * StaffFlow — the only way into staff screens is the separate AuthGate.
+ * Guest-facing flow only: table ordering + AI waiter chat + bill. Has no
+ * route to StaffFlow — the only way into staff screens is the separate
+ * AuthGate. AI Waiter chat is the default/deep-link screen; the manual menu
+ * and the bill are reachable via header buttons from either screen (Bill is
+ * also reachable via the AI's `request_check` tool call).
  */
 export function CustomerNavigator() {
   return (
     <Stack.Navigator
-      initialRouteName="Guest"
+      initialRouteName="Chat"
       screenOptions={{
         ...darkHeader,
         contentStyle: { backgroundColor: premium.screen },
       }}
     >
       <Stack.Screen
+        name="Chat"
+        component={ChatScreen}
+        options={({ navigation }) => ({
+          title: "AI Waiter",
+          headerRight: () => (
+            <View style={{ flexDirection: "row", gap: 14, alignItems: "center" }}>
+              <HeaderNavButton
+                label="Browse Menu"
+                onPress={() => navigation.navigate("Guest")}
+              />
+              <HeaderNavButton
+                label="Ask for Check"
+                onPress={() => navigation.navigate("Bill")}
+              />
+            </View>
+          ),
+        })}
+      />
+      <Stack.Screen
         name="Guest"
         component={GuestMenuScreen}
         options={({ navigation }) => ({
           title: "Order",
           headerRight: () => (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Chat with AI Waiter"
-              onPress={() => navigation.navigate("Chat")}
-              hitSlop={8}
-            >
-              <Text
-                style={{
-                  color: premium.navAccent,
-                  fontWeight: "700",
-                  fontSize: 14,
-                }}
-              >
-                AI Waiter
-              </Text>
-            </Pressable>
+            <View style={{ flexDirection: "row", gap: 14, alignItems: "center" }}>
+              <HeaderNavButton
+                label="AI Waiter"
+                onPress={() => navigation.navigate("Chat")}
+              />
+              <HeaderNavButton
+                label="Ask for Check"
+                onPress={() => navigation.navigate("Bill")}
+              />
+            </View>
           ),
         })}
       />
       <Stack.Screen
-        name="Chat"
-        component={ChatScreen}
-        options={{ title: "AI Waiter" }}
+        name="Bill"
+        component={BillScreen}
+        options={{ title: "Your Bill" }}
       />
     </Stack.Navigator>
   );

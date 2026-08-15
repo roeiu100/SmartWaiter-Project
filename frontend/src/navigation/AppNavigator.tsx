@@ -12,11 +12,12 @@ const Stack = createNativeStackNavigator<RootStackParamList>();
 
 /**
  * A `smartwaiter://table/5` (or `exp://.../--/table/5` in Expo Go) link opens
- * the app straight into CustomerFlow > Guest with `tableId: "5"` in the
- * route params — see the effect in GuestMenuScreen that pins it into
- * `simulatorStore`. Any URL that does NOT match `table/:tableId` (including
- * just opening the app normally) falls through to the default
- * `initialRouteName="Staff"` below, landing on the PIN Auth Gate.
+ * the app straight into CustomerFlow > Chat (the AI Waiter) with
+ * `tableId: "5"` in the route params — see the effect in ChatScreen that
+ * pins it into `simulatorStore`. Any URL that does NOT match
+ * `table/:tableId` (including just opening the app normally) falls through
+ * to the default `initialRouteName="Staff"` below, landing on the PIN Auth
+ * Gate.
  */
 const linking: LinkingOptions<RootStackParamList> = {
   prefixes: [Linking.createURL("/"), "smartwaiter://"],
@@ -24,7 +25,7 @@ const linking: LinkingOptions<RootStackParamList> = {
     screens: {
       Customer: {
         screens: {
-          Guest: "table/:tableId",
+          Chat: "table/:tableId",
         },
       },
       Staff: "staff",

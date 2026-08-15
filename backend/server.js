@@ -30,107 +30,84 @@ let activeRunnerAlerts = [];
 // SYSTEM_PROMPT — Persona + operational rules (XML-structured)
 // =============================================================================
 const SYSTEM_PROMPT = `<persona>
-You are a highly professional, formal, and polite waiter at an upscale restaurant.
-Always use refined language (e.g., 'Certainly, sir/madam', 'An excellent choice', 'Allow me to assist you with that').
-You must NEVER refer to yourself as an AI, a bot, or a digital assistant. You are a dedicated hospitality professional providing impeccable service.
-Keep all responses extremely concise, punchy, and efficient. Do not write long paragraphs. Speak like a busy but polite waiter who needs to take the order quickly. Limit your responses to 1-2 short sentences whenever possible.
+You are the waiter at an upscale, modern restaurant — warm, attentive, and genuinely engaged, the kind of server regulars ask for by name. Speak like a real hospitality professional, not a script: natural conversational transitions ("Excellent choice, the Ribeye is fantastic tonight"), light warmth, confident menu knowledge. Never refer to yourself as an AI, bot, or assistant — you are waitstaff.
+You are table-side brief: attentive, but busy. Keep replies tight and natural — a sentence or two of real substance, never a ramble — and always close with a genuine hospitality follow-up that moves the visit forward.
 </persona>
 
 <examples>
 User: I want a burger.
-Assistant: Certainly. Any preferences for how it is prepared?
-User: Bring me water.
-Assistant: Right away. A runner will bring water to your table.
+Assistant: Excellent choice — how would you like that cooked for you?
+User: Bring me some water.
+Assistant: Of course, I'll have a runner bring that right over. Anything else while you look over the menu?
 </examples>
 
 <operational_instructions>
-You are a premium, intelligent AI waiter. You must drive the conversation forward step-by-step. 
+You are the restaurant's waiter, driving the conversation forward step-by-step with the warmth described above.
 
 AVAILABILITY RULE (CRITICAL):
-Check the 'is_available' flag for EVERY requested item. If an item is false, DO NOT add it to the cart. Apologize, state that it is sold out, and suggest a SPECIFIC item that is currently 'is_available: true' from the menu instead (e.g., "The Burger is sold out today, but our Caesar Salad is available"). NEVER invent or suggest items that do not exist in the menu JSON.
+Only offer items shown in the menu below. Anything under "Sold out" is NOT available — if requested, apologize warmly, confirm it's sold out tonight, and suggest one specific available item instead. Never invent or offer an item that isn't in the menu.
 
 DIETARY SAFETY GUARDIAN (CRITICAL):
-If the guest mentions an allergy (e.g., nuts, gluten, dairy) or dietary preference (e.g., vegan), you MUST check the 'metadata' (allergens and ingredients) of the items they order in the menu JSON. If an item contains their allergen, WARN them immediately and suggest a safe alternative. Do NOT add a dangerous item to the cart unless they explicitly confirm it after your warning.
+If the guest mentions an allergy or dietary restriction, check the "contains:" tag on each item they order. If an item's tag matches their allergen, warn them immediately and suggest a safe alternative. Never add a flagged item to the cart unless they explicitly confirm it after your warning.
 
-INGREDIENT HALLUCINATION (CRITICAL):
-- When a guest requests a modification (e.g., 'no tomato'), simply acknowledge the modification and apply it. YOU ARE STRICTLY FORBIDDEN from listing, describing, or assuming any other ingredients (like lettuce, pickles, sauce, etc.) are on the dish unless they are explicitly written in the item's 'description' or 'metadata' in the provided menu JSON.
-- Never explain what a dish 'typically' comes with.
+NO INVENTED INGREDIENTS (CRITICAL):
+You are only given item names, prices, and (when relevant) an allergen or modification tag — no descriptions. Never state, list, or imply specific ingredients beyond the item name, and never explain what a dish "typically" comes with. Acknowledge modification requests (e.g. "no tomato") and apply them without inventing what else is on the plate.
 
 TOOL SURVIVAL RULE (CRITICAL FOR PREVENTING CRASHES):
-1. If the guest declines an upsell (e.g., "No thanks" to a drink or side), YOU MUST NOT CALL 'update_cart'. Just reply with plain conversational text asking the next question. NEVER use quantity: 0 just to skip an item!
-2. Only use 'update_cart' with quantity: 0 if the guest explicitly asks to REMOVE an item they already ordered in the past.
+1. If the guest declines an upsell (e.g., "No thanks" to a drink or side), do NOT call 'update_cart'. Just reply with plain conversational text asking the next question. Never use quantity: 0 just to skip an item.
+2. Only use 'update_cart' with quantity: 0 if the guest explicitly asks to remove an item they already ordered.
 
-CRITICAL TOOL RULE: When calling the 'update_cart' tool, your arguments MUST be a single JSON object (e.g., \`{"item_id": "...", "quantity": 1}\`). NEVER wrap the arguments in an array \`[]\`.
+CRITICAL TOOL RULE: 'update_cart' arguments MUST be a single flat JSON object (e.g. \`{"item_name": "Ribeye Steak", "quantity": 1}\`) — never wrapped in an array.
 
 NATIVE TOOL CALLING (CRITICAL — prevents API failures):
-You must NEVER use XML tags, HTML tags, markdown code fences, or raw text blocks like <function=update_cart> or <function=update_cart(...)</function> to call tools.
-You must STRICTLY use the native Tool Calling / Function Calling API provided by the platform to invoke update_cart, submit_order, and request_runner.
-Put your spoken reply to the guest in the guest_reply field inside the tool's JSON arguments — do NOT write tool calls as plain text in your message content.
+Never use XML/HTML tags, markdown fences, or text like <function=update_cart> to call a tool. You MUST use the platform's native Tool Calling API for update_cart, submit_order, request_runner, and request_check. Put your spoken reply in the tool's 'guest_reply' argument — never write a tool call as plain message text.
 
 MEMORY RULE (CRITICAL):
-Once you call 'update_cart' for an item, it is permanently saved. DO NOT re-add old items in future turns! If they say "Yes" to fries, ONLY call 'update_cart' for the fries. NEVER call 'update_cart' for the main dish again.
+Once you call 'update_cart' for an item, it's saved. Never re-add it in a later turn — e.g. if they say "yes" to fries, call 'update_cart' for the fries only, not the main again.
 
 MODIFICATION QUESTIONS (CRITICAL):
-- Look at the 'metadata.ai_questions' field for each requested item in the menu JSON.
-- If an item has 'ai_questions', you MUST ask the guest those specific questions before calling update_cart.
-- If an item DOES NOT have 'ai_questions' (or metadata is null), you are STRICTLY FORBIDDEN from asking any modification, size, or variation questions about it. Simply confirm the item. NEVER invent choices that do not exist in the menu.
+Some items carry an "ask:" tag with one specific question (e.g. how a steak should be cooked). If an item has one, ask exactly that before calling 'update_cart' for it. If it has no "ask:" tag, just confirm the item — never invent a modification, size, or variation question that isn't tagged.
 
-// Updated algorithm references to enforce a mandatory summary-confirmation step.
-BULK ORDER FAST-TRACK (CRITICAL):
-// New bulk-order guardrail: only ask modification questions when metadata.ai_questions is set on that item.
-// The assistant must acknowledge all items, ask missing ai_questions first, and wait before update_cart on those lines.
-If the guest orders multiple items at once (e.g., "I want a burger, truffle fries, and a coke"), you must acknowledge the FULL order and then ask the required modification questions ONLY IF the item's metadata contains 'ai_questions' (ask only what that field says — one combined friendly reply if several items need questions).
-// Unified acknowledgement rule: always name every requested item in one sentence, never only the last item.
-    -> Example (burger has metadata.ai_questions, fries and coke do not): "I've noted the burger, the truffle fries, and the coke. For the burger, [ask exactly what metadata.ai_questions specifies]."
-- DO NOT skip Step 1 for dishes that have metadata.ai_questions.
-- DO NOT call 'update_cart' for items with metadata.ai_questions until the guest answers those questions.
-- Your reply (or guest_reply) MUST end with the ai_questions prompt when at least one item in the order still needs it.
-- For items in the same bulk message that have no metadata.ai_questions, you may add them with 'update_cart' immediately (after briefly confirming them).
-// Prevent redundant upsells: if side/drink already exists in the bulk order, skip those upsell questions and continue forward.
-- If the bulk order already includes a side dish, DO NOT suggest another side in Step 2.
-- If the bulk order already includes a drink, DO NOT ask the Step 3 drink upsell.
-// Resume logic: after modifications are answered and the main is added, jump to Step 5 when side+drink are already fulfilled.
-- After the guest answers modifications, call 'update_cart' for the main dish; if side and drink were already included in the bulk order, treat Steps 2 and 3 as fulfilled and jump directly to Step 5 (Order Summary).
-- Skip only the already-fulfilled upsell steps, then continue to the next unfulfilled step (Step 4 if needed, otherwise Step 5 Order Summary, then Step 6 Submit after explicit confirmation).
-// Bulk-order fast-track overrides generic upsell sequencing when side/drink are already present in the same user message.
+BULK ORDERS (CRITICAL):
+If the guest orders multiple items at once (e.g., "a burger, truffle fries, and a coke"), acknowledge the FULL order by name in one sentence — never only the last item — then ask the "ask:" question ONLY for items that carry one (one combined friendly reply if several need it).
+    -> Example (only the burger has an "ask:" tag): "I've got the burger, the truffle fries, and a coke noted. For the burger, [ask exactly what its "ask:" tag says]."
+- Do not call 'update_cart' on an item with an "ask:" tag until it's answered.
+- Items without an "ask:" tag may be added with 'update_cart' right away, after a brief confirmation.
+- If the bulk order already includes a side, don't suggest another in Step 2. If it already includes a drink, skip the Step 3 drink question.
+- After modifications are answered and the main is added: if side and drink are already fulfilled from the bulk order, skip straight to Step 5 (Order Summary); otherwise continue to the next unfulfilled step.
 
 ANTI-SKIP RULE (CRITICAL):
-You are STRICTLY FORBIDDEN from asking about drinks until you have explicitly asked the guest if they want a side dish.
+Never ask about drinks before you've asked about a side/pairing.
 
-// Upgraded to strict 6-step flow: summary must happen before any kitchen submission.
-STRICT 6-STEP ALGORITHM:
-STEP 1 (Modifications): If they order a dish whose menu row has metadata.ai_questions, ask ONLY those questions (wording from that field). If the item has no metadata.ai_questions, simply confirm the item — do NOT invent modification, size, or variation questions. DO NOT call update_cart yet for items still waiting on ai_questions answers.
-STEP 2 (Smart Side Upsell): When they reply with modifications (or when the main had no ai_questions and only needed confirmation), call 'update_cart' for the main dish. Look at the menu_items and pick ONE SPECIFIC side dish that pairs perfectly with their main. Your 'guest_reply' MUST confirm the food AND suggest that specific side.
-    -> Example: "Got it, a burger with extra cheese. Our Truffle Fries pair perfectly with that—would you like to add that to your order?"
-STEP 3 (The Drink Question): When they answer about the side (e.g., "Yes" or "No thanks"), call 'update_cart' for the side (if ordered). Your 'guest_reply' MUST confirm the side AND explicitly ask about drinks.
-    -> Example: "Perfect, added the fries. Would you like something to drink with your meal?"
-// Step 4 now ONLY checks whether the guest wants to add more items.
-STEP 4 (Anything Else): When they answer about the drink, call 'update_cart' for the drink (if ordered). Your 'guest_reply' MUST confirm the drink AND ask ONLY if they want anything else.
-    -> Example: "Got it, one Coca-Cola zero. Would you like anything else?"
-// New required checkpoint: full conversational summary before submit_order is allowed.
-STEP 5 (Order Summary): If the guest says they are done ordering, you MUST summarize the ENTIRE current order in a friendly, conversational way and ask for explicit confirmation. DO NOT call 'submit_order' in this step.
-    -> Example: "Just to confirm, I have a Burger with extra cheese, Truffle Fries, and a Coke. Does everything look correct?"
-// submit_order is now strictly gated behind explicit confirmation of the Step 5 summary.
-STEP 6 (Submit): ONLY AFTER the guest explicitly confirms the full Step 5 summary (e.g., "yes", "correct", "looks good"), call 'submit_order'. Then confirm it was sent.
+STRICT 6-STEP ORDER FLOW:
+STEP 1 (Modifications): Ask the "ask:" question for any ordered item that has one, wording it exactly as tagged. Items without one just get confirmed — never invent a question. Don't call 'update_cart' on an item still waiting on its "ask:" answer.
+STEP 2 (Smart Pairing): Once modifications are answered (or the item needed none), call 'update_cart' for the main. Then suggest ONE specific pairing that genuinely complements it — a side dish, or, when it's a natural fit (e.g. a steak, a rich pasta), a specific drink from the menu instead (e.g. a glass of red wine). Your 'guest_reply' confirms the item AND makes that one suggestion.
+    -> "Wonderful, the Ribeye it is. Might I suggest a glass of our house red to go with that?"
+STEP 3 (Anything to Drink): When they answer Step 2's suggestion, call 'update_cart' for it if accepted. If Step 2's suggestion was itself a drink and they took it, skip straight to Step 4. Otherwise confirm their answer and ask about drinks.
+    -> "Perfect, I've added the fries. Would you like something to drink with that?"
+STEP 4 (Anything Else): Call 'update_cart' for the drink if ordered, confirm it, and ask only if they'd like anything else.
+STEP 5 (Order Summary): Once they're done, summarize the full order conversationally and ask them to confirm. Do NOT call 'submit_order' in this step.
+    -> "Just to confirm: one Ribeye, medium-rare, with the house red and the truffle fries. Shall I send that through?"
+STEP 6 (Submit): Only after explicit confirmation of the Step 5 summary (e.g. "yes", "correct", "looks good"), call 'submit_order', then confirm it's on its way to the kitchen.
 
-CRITICAL RULE: EVERY SINGLE MESSAGE YOU SEND MUST END WITH A NATURAL, CONVERSATIONAL FOLLOW-UP QUESTION until the order is sent. NEVER just output a standalone '?' and NEVER append a '?' to a statement that isn't a question. Always formulate a proper sentence asking the guest for their preference.
+Every message before the order is sent must end with a genuine hospitality follow-up — never a bare "?" and never a "?" tacked onto a statement that isn't a question.
 
 RUNNER REQUESTS (CRITICAL — separate flow from food ordering):
-Non-menu service items — e.g. napkins, water, ice, ketchup, mustard, mayo, hot sauce, cutlery, knife, fork, spoon, straws, extra plate, extra chair, extra glass, high chair — are NEVER food cart items. Do NOT call 'update_cart' for them.
+Non-menu items — napkins, water, ice, condiments, cutlery, extra plate/chair/glass, high chair, etc. — are NEVER cart items. Never call 'update_cart' for them.
+1. On the first such request, don't call any tool yet — confirm it in plain text and ask "Anything else?". Keep the running list in memory.
+2. Keep confirming and asking "anything else?" for each further request of this kind.
+3. The moment they say "no"/"that's all"/"nothing" (in any language), immediately call 'request_runner' ONCE with every requested item as one comma-separated string (e.g. "napkins, ketchup"). Your 'guest_reply' confirms a runner is on the way — no follow-up question after.
+4. Never mix this with 'update_cart'/'submit_order' — a guest can do either, both, or neither in the same session.
 
-Runner request flow:
-1. When the guest asks for such an item, DO NOT call any tool yet. In plain text, confirm the item briefly AND ask "Anything else?" in the same reply. Keep the list in conversation memory.
-   -> Example: "Napkins coming up. Anything else?"
-2. Every subsequent request of this kind: confirm it and keep asking "anything else?".
-3. The MOMENT the guest replies "no" / "that's all" / "nothing" (or equivalent in their language), IMMEDIATELY call the 'request_runner' tool ONCE with a single 'request' string that lists every item the guest asked for in this runner session, separated by commas (e.g. "napkins, ketchup"). Your 'guest_reply' must confirm that a runner is on the way. DO NOT ask a follow-up question after calling 'request_runner'.
-4. Do NOT mix this flow with 'update_cart' or 'submit_order'. Runner requests and food orders are independent — a guest can do one, the other, or both in the same session.
+CHECK / BILL REQUESTS (CRITICAL — separate flow from food ordering and runner requests):
+If the guest asks for the check, the bill, to pay, or to close out (any language, e.g. "can I get the check", "החשבון בבקשה"), do not call 'update_cart' or 'submit_order'. Immediately call 'request_check' ONCE; 'guest_reply' briefly confirms you're bringing up their bill. No follow-up question after.
 
-LANGUAGE: Reply ONLY in the language the user used last.
+LANGUAGE: Reply only in the language the guest used most recently.
 </operational_instructions>`;
 
 /** Appended as the final system message before each Groq completion (persona anchor). */
 const PERSONA_ANCHOR_SYSTEM_MESSAGE =
-  "CRITICAL INSTRUCTION: Respond to the user's latest message strictly using your formal, polite, and professional waiter persona. Follow all operational instructions. If you need update_cart, submit_order, or request_runner, invoke them ONLY via native tool/function calling — never as <function=...> text.";
+  "CRITICAL INSTRUCTION: Respond to the user's latest message strictly using your warm, table-side-brief waiter persona. Follow all operational instructions. If you need update_cart, submit_order, request_runner, or request_check, invoke them ONLY via native tool/function calling — never as <function=...> text.";
 
 const RUNNER_OPTIONS_FALLBACK = "Napkins, Water, Ketchup";
 
@@ -143,14 +120,14 @@ const GROQ_CHAT_TOOL_UPDATE_CART = {
   function: {
     name: "update_cart",
     description:
-      "Add, update quantity, or remove one menu line on the guest's cart. Invoke ONLY via native tool calling (never as <function=...> text). Pass one flat JSON object: item_id, quantity, optional special_requests, guest_reply.",
+      "Add, update quantity, or remove one menu line on the guest's cart. Invoke ONLY via native tool calling (never as <function=...> text). Pass one flat JSON object: item_name, quantity, optional special_requests, guest_reply.",
     parameters: {
       type: "object",
       properties: {
-        item_id: {
+        item_name: {
           type: "string",
           description:
-            "Primary key UUID of the menu_items row from the menu JSON.",
+            "The item's exact name as shown in the menu below (e.g. \"Ribeye Steak\"). Must match a real menu item — never invent one.",
         },
         quantity: {
           type: "number",
@@ -165,10 +142,10 @@ const GROQ_CHAT_TOOL_UPDATE_CART = {
         guest_reply: {
           type: "string",
           description:
-            "Your conversational reply to the guest for this turn (formal waiter persona). End with a natural follow-up question when appropriate.",
+            "Your warm, table-side-brief reply to the guest for this turn. End with a natural hospitality follow-up when appropriate.",
         },
       },
-      required: ["item_id", "quantity", "guest_reply"],
+      required: ["item_name", "quantity", "guest_reply"],
     },
   },
 };
@@ -186,6 +163,26 @@ const GROQ_CHAT_TOOL_SUBMIT_ORDER = {
           type: "string",
           description:
             "Confirmation message to the guest that the order is being sent to the kitchen.",
+        },
+      },
+      required: ["guest_reply"],
+    },
+  },
+};
+
+const GROQ_CHAT_TOOL_REQUEST_CHECK = {
+  type: "function",
+  function: {
+    name: "request_check",
+    description:
+      "Open the guest's Bill screen when they ask for the check, the bill, or to pay/close out. Purely a client-side navigation effect — no server-side order data is required or mutated. Invoke ONLY via native tool calling.",
+    parameters: {
+      type: "object",
+      properties: {
+        guest_reply: {
+          type: "string",
+          description:
+            "Short confirmation that you're bringing up their bill. Match the guest's language.",
         },
       },
       required: ["guest_reply"],
@@ -231,6 +228,7 @@ function buildGroqChatTools(runnerOptionsString) {
     GROQ_CHAT_TOOL_UPDATE_CART,
     GROQ_CHAT_TOOL_SUBMIT_ORDER,
     GROQ_CHAT_TOOL_REQUEST_RUNNER,
+    GROQ_CHAT_TOOL_REQUEST_CHECK,
   ];
 }
 
@@ -282,7 +280,7 @@ async function createGroqChatCompletionWithTools({
       {
         role: "system",
         content:
-          "REMINDER: You MUST invoke update_cart, submit_order, and request_runner using native Tool Calling only. NEVER output <function=name> or <function=name(...)</function> tags or any XML/HTML tool syntax.",
+          "REMINDER: You MUST invoke update_cart, submit_order, request_runner, and request_check using native Tool Calling only. NEVER output <function=name> or <function=name(...)</function> tags or any XML/HTML tool syntax.",
       },
     ];
     return await groq.chat.completions.create({
@@ -379,6 +377,82 @@ async function fetchMenuItemsWithRetry() {
     await new Promise((r) => setTimeout(r, delayMs));
   }
   return { data: null, error: lastError };
+}
+
+/** Category display order for the compact prompt menu — everything else falls after, alphabetically. */
+const PROMPT_CATEGORY_ORDER = ["starters", "main courses", "desserts", "drinks"];
+
+function titleCaseCategory(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return "Other";
+  return s
+    .split(/\s+/)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+}
+
+/**
+ * Formats Supabase menu_items into a compact, token-cheap catalog for the
+ * Groq prompt — grouped by category, one line per category, e.g.:
+ *   "Starters: Mozzarella Sticks ($7.50), Garlic Bread ($5.00)
+ *    Main Courses: Ribeye Steak ($28.00) [ask: how would you like that cooked?]"
+ * Deliberately excludes ids (UUIDs), descriptions, and raw metadata/ingredients
+ * — those cost tokens without helping the model. The two metadata fields that
+ * genuinely drive behavior (ai_questions, allergens) are kept as short inline
+ * tags so the CRITICAL guardrails in SYSTEM_PROMPT ("ask:" / "contains:")
+ * still have something to read. Sold-out items are listed by name only, in
+ * one trailing line, so the model still knows they exist (and can apologize
+ * + redirect) without spending a token-per-item availability flag.
+ */
+function formatMenuForPrompt(menuRows) {
+  const byCategory = new Map();
+  const soldOut = [];
+
+  for (const row of Array.isArray(menuRows) ? menuRows : []) {
+    const name = typeof row?.name === "string" ? row.name.trim() : "";
+    if (!name) continue;
+
+    if (row?.is_available === false) {
+      soldOut.push(name);
+      continue;
+    }
+
+    const price = Number(row?.price ?? 0);
+    const category = titleCaseCategory(row?.category);
+    const meta =
+      row?.metadata && typeof row.metadata === "object" ? row.metadata : null;
+
+    const tags = [];
+    const askQuestion =
+      meta && typeof meta.ai_questions === "string" ? meta.ai_questions.trim() : "";
+    if (askQuestion) tags.push(`ask: ${askQuestion}`);
+    const allergens =
+      meta && Array.isArray(meta.allergens)
+        ? meta.allergens.filter((a) => typeof a === "string" && a.trim())
+        : [];
+    if (allergens.length > 0) tags.push(`contains: ${allergens.join(", ")}`);
+    const tagSuffix = tags.length > 0 ? ` [${tags.join("; ")}]` : "";
+
+    const entry = `${name} ($${price.toFixed(2)})${tagSuffix}`;
+    const arr = byCategory.get(category) ?? [];
+    arr.push(entry);
+    byCategory.set(category, arr);
+  }
+
+  const categories = Array.from(byCategory.keys()).sort((a, b) => {
+    const ra = PROMPT_CATEGORY_ORDER.indexOf(a.toLowerCase());
+    const rb = PROMPT_CATEGORY_ORDER.indexOf(b.toLowerCase());
+    const na = ra === -1 ? PROMPT_CATEGORY_ORDER.length : ra;
+    const nb = rb === -1 ? PROMPT_CATEGORY_ORDER.length : rb;
+    if (na !== nb) return na - nb;
+    return a.localeCompare(b);
+  });
+
+  const lines = categories.map((c) => `${c}: ${byCategory.get(c).join(", ")}`);
+  if (soldOut.length > 0) {
+    lines.push(`Sold out (do not offer): ${soldOut.join(", ")}`);
+  }
+  return lines.join("\n");
 }
 
 const groqApiKey = process.env.GROQ_API_KEY;
@@ -1066,6 +1140,89 @@ app.get("/api/orders/active", async (req, res) => {
   }
 });
 
+// Unlike /active, this INCLUDES `delivered` orders — a guest who finished
+// eating still needs to see/pay their bill. "Unpaid" (paid_at IS NULL) is
+// the closest thing this app has to a table "session".
+app.get("/api/orders/unpaid", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("orders")
+      .select(
+        `id, table_id, status, total_price, created_at, submitted_at,
+         ready_at, served_at, guest_note, paid_at,
+         order_items:order_items (
+           id, order_id, menu_item_id, quantity, unit_price, status,
+           ready_at, served_at, notes,
+           menu_items:menu_items ( id, name )
+         )`
+      )
+      .is("paid_at", null)
+      .order("created_at", { ascending: true });
+    if (error) {
+      console.error("[api/orders/unpaid]", error);
+      return res.status(500).json({ error: error.message });
+    }
+    const rows = (data ?? []).map((row) => {
+      const items = (row.order_items ?? []).map((it) => ({
+        id: it.id,
+        order_id: it.order_id,
+        menu_item_id: it.menu_item_id,
+        quantity: it.quantity,
+        unit_price: Number(it.unit_price ?? 0),
+        status: it.status,
+        ready_at: it.ready_at,
+        served_at: it.served_at,
+        notes: it.notes,
+        menu_item_name: it.menu_items?.name ?? "",
+      }));
+      const { order_items: _omit, ...orderRow } = row;
+      return {
+        ...orderRow,
+        total_price: Number(orderRow.total_price ?? 0),
+        items,
+      };
+    });
+    return res.json(rows);
+  } catch (err) {
+    console.error("[api/orders/unpaid]", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Marks every currently-unpaid order for a table as paid and resets the
+// table for the next guest. Idempotent — paying an empty/already-paid table
+// still returns 200 with order_ids: [] rather than erroring, so a guest
+// double-tapping "Pay Now" can't blow up.
+app.post("/api/orders/table/:tableId/pay", async (req, res) => {
+  try {
+    const tableId = (req.params.tableId ?? "").trim();
+    if (!tableId) {
+      return res.status(400).json({ error: "Missing table id" });
+    }
+    const nowIso = new Date().toISOString();
+    const { data, error } = await supabase
+      .from("orders")
+      .update({ paid_at: nowIso })
+      .eq("table_id", tableId)
+      .is("paid_at", null)
+      .select("id");
+    if (error) {
+      console.error("[api/orders/table/:tableId/pay]", error);
+      return res.status(500).json({ error: error.message });
+    }
+    const order_ids = (data ?? []).map((r) => r.id);
+
+    if (io) {
+      io.emit("table_paid", { table_id: tableId, order_ids, paid_at: nowIso });
+    }
+
+    return res.json({ table_id: tableId, paid_at: nowIso, order_ids });
+  } catch (err) {
+    console.error("[api/orders/table/:tableId/pay]", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 app.patch("/api/orders/:id/items/:itemId/status", async (req, res) => {
   try {
     const orderId = (req.params.id ?? "").trim();
@@ -1434,13 +1591,13 @@ app.post("/api/chat", async (req, res) => {
 
     const runnerOptions = await fetchRunnerOptions();
 
-    const menuJson = JSON.stringify(menuRows ?? [], null, 2);
+    const compactMenu = formatMenuForPrompt(menuRows);
     const systemContent = `${SYSTEM_PROMPT}
 
 The following table service items are currently available: ${runnerOptions}. If the guest asks for a runner/table-service item that is NOT in this list, apologise and tell them it is not available — never silently substitute or invent.
 
---- Current menu_items (JSON; each row has id, name, price, category, is_available, description) ---
-${menuJson}`;
+--- Menu ---
+${compactMenu}`;
 
     const chatTools = buildGroqChatTools(runnerOptions);
 
@@ -1550,7 +1707,8 @@ ${menuJson}`;
       (t) =>
         t.name === "update_cart" ||
         t.name === "submit_order" ||
-        t.name === "request_runner"
+        t.name === "request_runner" ||
+        t.name === "request_check"
     );
 
     if (hasClientTools) {

@@ -39,6 +39,28 @@ function normToolName(name: string | null | undefined): string {
     .replace(/-/g, "_");
 }
 
+/**
+ * The AI's `update_cart` tool call carries an `item_name` (it's only ever
+ * shown a compact, id-free menu — see backend `formatMenuForPrompt`), so we
+ * resolve it back to the real menu_item id here, against the full menu this
+ * screen already fetches via `loadMenu`. Exact match first, then a loose
+ * substring match in case the model paraphrases slightly.
+ */
+function resolveMenuItemId(
+  items: MenuItemRow[],
+  itemName: string
+): string | null {
+  const target = itemName.trim().toLowerCase();
+  if (!target) return null;
+  const exact = items.find((m) => m.name.trim().toLowerCase() === target);
+  if (exact) return exact.id;
+  const loose = items.find((m) => {
+    const n = m.name.trim().toLowerCase();
+    return n.includes(target) || target.includes(n);
+  });
+  return loose ? loose.id : null;
+}
+
 function lastUserLanguage(messages: ChatMessage[]): "he" | "en" {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === "user" && messages[i].content.trim()) {
@@ -104,7 +126,14 @@ function cartLinesFromStore(): ChatCartLine[] {
 function categoryRank(name: string): number {
   const n = name.toLowerCase().trim();
   if (n === "starters" || n === "starter" || n === "appetizers") return 0;
-  if (n === "food" || n === "mains" || n === "main") return 1;
+  if (
+    n === "main courses" ||
+    n === "main course" ||
+    n === "mains" ||
+    n === "main" ||
+    n === "food"
+  )
+    return 1;
   if (n === "desserts" || n === "dessert") return 2;
   if (n === "drinks" || n === "drink") return 3;
   return 4;
@@ -154,13 +183,14 @@ function buildMenuSections(items: MenuItemRow[]): MenuSection[] {
   return sections;
 }
 
-export function ChatScreen(_props: Props) {
+export function ChatScreen({ navigation, route }: Props) {
   const insets = useSafeAreaInsets();
   const listRef = useRef<FlatList<ChatMessage>>(null);
 
   const messages = useChatWaiterStore((s) => s.messages);
   const appendMessage = useChatWaiterStore((s) => s.appendMessage);
   const guestTableId = useSimulatorStore((s) => s.guestTableId);
+  const lockGuestTable = useSimulatorStore((s) => s.lockGuestTable);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
@@ -191,10 +221,26 @@ export function ChatScreen(_props: Props) {
     }
   }, []);
 
+  // Load once on mount so `menuItems` (with real ids) is available for
+  // resolving the AI's `update_cart` tool calls even if the guest never
+  // opens the "View Menu" modal — see applyToolCalls below.
+  useEffect(() => {
+    void loadMenu();
+  }, [loadMenu]);
+
+  // Also refresh whenever the modal opens, so it shows the latest menu.
   useEffect(() => {
     if (!menuModalVisible) return;
     void loadMenu();
   }, [menuModalVisible, loadMenu]);
+
+  /** Table id from the `table/:tableId` QR deep link — pins it so the guest can't edit it. */
+  useEffect(() => {
+    const tableId = route.params?.tableId?.trim();
+    if (tableId) {
+      lockGuestTable(tableId);
+    }
+  }, [route.params?.tableId, lockGuestTable]);
 
   useEffect(() => {
     const baseUrl =
@@ -308,6 +354,11 @@ export function ChatScreen(_props: Props) {
 
   const applyToolCalls = useCallback((tool_calls: ParsedToolCall[]) => {
     for (const tc of tool_calls) {
+      if (normToolName(tc.name) === "request_check") {
+        console.log("[Chat] Tool call (request_check) -> navigating to Bill");
+        navigation.navigate("Bill");
+        continue;
+      }
       if (normToolName(tc.name) === "request_runner") {
         // Side effect (emitting the runner alert) is handled by the server
         // in POST /api/chat so the Runner tablet sees it immediately. We
@@ -320,20 +371,28 @@ export function ChatScreen(_props: Props) {
       console.log("[Chat] Tool call (update_cart):", tc);
       if (!tc.arguments || typeof tc.arguments !== "object") continue;
 
-      const { item_id, quantity, special_requests } = tc.arguments as {
-        item_id?: unknown;
+      const { item_name, quantity, special_requests } = tc.arguments as {
+        item_name?: unknown;
         quantity?: unknown;
         special_requests?: unknown;
       };
-      const id = item_id != null ? String(item_id) : "";
+      const name = typeof item_name === "string" ? item_name : "";
       const qty = Number(quantity);
       const notes =
         typeof special_requests === "string" ? special_requests : undefined;
-      if (id && Number.isFinite(qty)) {
-        useSimulatorStore.getState().setGuestCartLine(id, qty, notes);
+      if (!name || !Number.isFinite(qty)) continue;
+
+      const id = resolveMenuItemId(menuItems, name);
+      if (!id) {
+        console.warn(
+          "[Chat] update_cart: could not resolve item_name to a menu item:",
+          name
+        );
+        continue;
       }
+      useSimulatorStore.getState().setGuestCartLine(id, qty, notes);
     }
-  }, []);
+  }, [navigation, menuItems]);
 
   const onSend = useCallback(async () => {
     const trimmed = input.trim();

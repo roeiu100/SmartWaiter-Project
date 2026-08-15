@@ -29,10 +29,12 @@ type Props = NativeStackScreenProps<CustomerStackParamList, "Guest">;
  */
 function categoryRank(name: string): number {
   const n = name.toLowerCase().trim();
-  if (n === "food") return 0;
-  if (n === "desserts" || n === "dessert") return 1;
-  if (n === "drinks" || n === "drink") return 2;
-  return 3;
+  if (n === "starters" || n === "starter" || n === "appetizers") return 0;
+  if (n === "main courses" || n === "main course" || n === "mains" || n === "main")
+    return 1;
+  if (n === "desserts" || n === "dessert") return 2;
+  if (n === "drinks" || n === "drink") return 3;
+  return 4;
 }
 
 function titleCase(name: string): string {

@@ -401,7 +401,7 @@ export function ManagerScreen({ navigation }: Props) {
       return;
     }
     if (!category) {
-      Alert.alert("Missing category", "Please enter a category (e.g. food).");
+      Alert.alert("Missing category", "Please enter a category (e.g. starters).");
       return;
     }
     if (!Number.isFinite(priceNum) || priceNum < 0) {
@@ -574,10 +574,10 @@ export function ManagerScreen({ navigation }: Props) {
   );
 
   // Group menu items into collapsible category sections. Priority order
-  // mirrors the guest menu (Food → Desserts → Drinks → everything else
-  // alphabetically) so the manager sees the same layout guests do. Rows are
-  // flattened into a mixed header/item array so the existing FlatList can
-  // keep windowed rendering for large menus.
+  // mirrors the guest menu (Starters → Main Courses → Desserts → Drinks →
+  // everything else alphabetically) so the manager sees the same layout
+  // guests do. Rows are flattened into a mixed header/item array so the
+  // existing FlatList can keep windowed rendering for large menus.
   type MenuRow =
     | {
         kind: "header";
@@ -592,9 +592,10 @@ export function ManagerScreen({ navigation }: Props) {
 
   const menuRows = useMemo<MenuRow[]>(() => {
     const CATEGORY_RANK: Record<string, number> = {
-      food: 0,
-      desserts: 1,
-      drinks: 2,
+      starters: 0,
+      "main courses": 1,
+      desserts: 2,
+      drinks: 3,
     };
     const titleCase = (s: string) =>
       s
@@ -1043,7 +1044,7 @@ export function ManagerScreen({ navigation }: Props) {
                   <TextInput
                     value={newDishCategory}
                     onChangeText={setNewDishCategory}
-                    placeholder="e.g. food"
+                    placeholder="e.g. starters"
                     placeholderTextColor={premium.mutedLight}
                     style={styles.fieldInput}
                     autoCapitalize="none"

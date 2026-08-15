@@ -27,6 +27,8 @@ export interface ActiveOrder {
   ready_at: string | null;
   served_at: string | null;
   guest_note: string | null;
+  /** Set once the guest pays via POST /api/orders/table/:tableId/pay. NULL = still open. */
+  paid_at: string | null;
   items: ActiveOrderItem[];
 }
 
@@ -109,6 +111,7 @@ export function normalizeActiveOrder(raw: unknown): ActiveOrder | null {
     ready_at: toUtcIso(r.ready_at),
     served_at: toUtcIso(r.served_at),
     guest_note: typeof r.guest_note === "string" ? r.guest_note : null,
+    paid_at: toUtcIso(r.paid_at),
     items,
   };
 }
@@ -128,6 +131,51 @@ export async function fetchActiveOrders(): Promise<ActiveOrder[]> {
   return raw
     .map(normalizeActiveOrder)
     .filter((o): o is ActiveOrder => o !== null);
+}
+
+/** All unpaid orders across every table (server filters `paid_at IS NULL`). */
+export async function fetchUnpaidOrders(): Promise<ActiveOrder[]> {
+  const res = await fetch(`${MENU_API_BASE}/api/orders/unpaid`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(
+      `Fetch unpaid orders failed (${res.status}): ${text.slice(0, 200)}`
+    );
+  }
+  const raw = (await res.json()) as unknown;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(normalizeActiveOrder)
+    .filter((o): o is ActiveOrder => o !== null);
+}
+
+export interface PayTableResult {
+  table_id: string;
+  paid_at: string;
+  order_ids: string[];
+}
+
+/** Marks every unpaid order for `tableId` as paid. Idempotent. */
+export async function payForTable(tableId: string): Promise<PayTableResult> {
+  const res = await fetch(
+    `${MENU_API_BASE}/api/orders/table/${encodeURIComponent(tableId)}/pay`,
+    { method: "POST", headers: { Accept: "application/json" } }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Pay table failed (${res.status}): ${text.slice(0, 200)}`);
+  }
+  const json = (await res.json()) as Record<string, unknown>;
+  return {
+    table_id: typeof json.table_id === "string" ? json.table_id : tableId,
+    paid_at:
+      typeof json.paid_at === "string"
+        ? json.paid_at
+        : new Date().toISOString(),
+    order_ids: Array.isArray(json.order_ids) ? json.order_ids.map(String) : [],
+  };
 }
 
 export async function submitOrder(

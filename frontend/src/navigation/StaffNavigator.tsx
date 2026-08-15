@@ -2,7 +2,7 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { Pressable, Text } from "react-native";
 import { AuthGateScreen } from "../screens/AuthGateScreen";
 import { KitchenDashboardScreen } from "../screens/KitchenDashboardScreen";
-import { RunnerDashboardScreen } from "../screens/RunnerDashboardScreen";
+import { RunnerStackNavigator } from "./RunnerStackNavigator";
 import { ManagerTabNavigator } from "./ManagerTabNavigator";
 import { useAuthStore } from "../store/authStore";
 import { premium } from "../theme/premium";
@@ -73,8 +73,8 @@ export function StaffNavigator() {
       ) : role === "runner" ? (
         <Stack.Screen
           name="RunnerOnly"
-          component={RunnerDashboardScreen}
-          options={{ title: "Runner", headerRight: () => <LogoutButton /> }}
+          component={RunnerStackNavigator}
+          options={{ headerShown: false }}
         />
       ) : (
         <Stack.Screen

@@ -5,6 +5,7 @@ import { ManagerScreen } from "../screens/ManagerScreen";
 import { ManagerAnalyticsScreen } from "../screens/ManagerAnalyticsScreen";
 import { KitchenDashboardScreen } from "../screens/KitchenDashboardScreen";
 import { RunnerDashboardScreen } from "../screens/RunnerDashboardScreen";
+import { TableMapScreen } from "../screens/TableMapScreen";
 import { useAuthStore } from "../store/authStore";
 import { premium } from "../theme/premium";
 import type { ManagerStackParamList, ManagerTabParamList } from "./types";
@@ -92,6 +93,11 @@ export function ManagerTabNavigator() {
         name="RunnerTab"
         component={RunnerDashboardScreen}
         options={{ title: "Runner" }}
+      />
+      <Tab.Screen
+        name="TablesTab"
+        component={TableMapScreen}
+        options={{ title: "Tables" }}
       />
     </Tab.Navigator>
   );

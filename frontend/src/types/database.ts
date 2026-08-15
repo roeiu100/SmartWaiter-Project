@@ -52,6 +52,8 @@ export interface OrderRow {
   table_id: string;
   status: OrderStatus;
   total_price: number;
+  /** Set once the guest pays; NULL = still open. See orders_payment_schema.sql. */
+  paid_at?: string | null;
 }
 
 /** Table: runner_options — non-menu service items (napkins, ketchup, etc.) */
