@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
+import Svg, { Circle, Rect } from "react-native-svg";
 import {
   ActivityIndicator,
   Alert,
   FlatList,
+  type LayoutChangeEvent,
   Modal,
   Pressable,
   StyleSheet,
@@ -17,10 +19,239 @@ import {
   type ActiveOrder,
   type ActiveOrderItemStatus,
 } from "../services/orderApi";
+import { TABLE_LAYOUT, type TableLayoutEntry, type TableShape } from "../data/tableLayout";
 import { premium } from "../theme/premium";
 
-/** No `tables` table exists in the DB — this is a fixed demo table set. */
-const TABLE_IDS = ["1", "2", "3", "4", "5"];
+const CHAIR_SIZE = 10;
+const CHAIR_GAP = 6;
+
+// Warm wood palette for the floor + tabletops, and a chair-frame tone —
+// deliberately NOT tied to `premium` (which is a neutral gray/gold UI
+// palette) since the floor plan should read as an actual restaurant room.
+const WOOD_PLANK_SHADES = ["#C9975C", "#BE8A4E", "#B47F45", "#A8763E"];
+const WOOD_PLANK_SEPARATOR = "rgba(74,46,20,0.35)";
+const WOOD_PLANK_GRAIN = "rgba(255,255,255,0.10)";
+const PLANK_WIDTH = 46;
+
+const WOOD_TABLE_FILL = "#DCA972";
+const WOOD_TABLE_EDGE = "#8B5A2B";
+const CHAIR_COLOR = "#5C3A21";
+
+const STATUS_COLORS = {
+  empty: { ring: "#22C55E", chipBg: "rgba(34,197,94,0.16)", chipText: "#15803D" },
+  occupied: { ring: "#F97316", chipBg: "rgba(249,115,22,0.18)", chipText: "#C2410C" },
+};
+
+/** A full-bleed wood-plank floor texture, purely SVG (no image assets). */
+function WoodFloorBackground({ width, height }: { width: number; height: number }) {
+  const plankCount = useMemo(
+    () => (width > 0 ? Math.ceil(width / PLANK_WIDTH) + 1 : 0),
+    [width]
+  );
+  if (width <= 0 || height <= 0 || plankCount === 0) return null;
+  return (
+    <View style={StyleSheet.absoluteFillObject} pointerEvents="none">
+      <Svg width={width} height={height}>
+        {Array.from({ length: plankCount }, (_, i) => {
+          const x = i * PLANK_WIDTH;
+          const shade = WOOD_PLANK_SHADES[i % WOOD_PLANK_SHADES.length];
+          return (
+            <Fragment key={i}>
+              <Rect x={x} y={0} width={PLANK_WIDTH} height={height} fill={shade} />
+              <Rect x={x + PLANK_WIDTH * 0.28} y={height * 0.18} width={PLANK_WIDTH * 0.44} height={1.5} fill={WOOD_PLANK_GRAIN} />
+              <Rect x={x + PLANK_WIDTH * 0.18} y={height * 0.52} width={PLANK_WIDTH * 0.5} height={1.5} fill={WOOD_PLANK_GRAIN} />
+              <Rect x={x + PLANK_WIDTH * 0.32} y={height * 0.8} width={PLANK_WIDTH * 0.36} height={1.5} fill={WOOD_PLANK_GRAIN} />
+              <Rect x={x - 0.75} y={0} width={1.5} height={height} fill={WOOD_PLANK_SEPARATOR} />
+            </Fragment>
+          );
+        })}
+      </Svg>
+    </View>
+  );
+}
+
+interface ChairSpec {
+  seatX: number;
+  seatY: number;
+  backX: number;
+  backY: number;
+}
+
+/**
+ * Seat + backrest position for each chair, in SVG units local to the
+ * table's center. The backrest sits further from center than the seat
+ * along the same direction, so every chair visually "faces" the table
+ * with no rotation math needed.
+ */
+function getChairSpecs(
+  shape: TableShape,
+  seats: number,
+  tableW: number,
+  tableH: number
+): ChairSpec[] {
+  const n = Math.max(1, seats);
+  const specs: ChairSpec[] = [];
+  if (shape === "round") {
+    const seatRadius = tableW / 2 + CHAIR_GAP + CHAIR_SIZE / 2;
+    const backRadius = seatRadius + CHAIR_SIZE * 0.6;
+    for (let i = 0; i < n; i++) {
+      const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
+      const cosA = Math.cos(angle);
+      const sinA = Math.sin(angle);
+      specs.push({
+        seatX: cosA * seatRadius,
+        seatY: sinA * seatRadius,
+        backX: cosA * backRadius,
+        backY: sinA * backRadius,
+      });
+    }
+    return specs;
+  }
+  // Rectangular table: distribute seats along the two long (top/bottom) edges.
+  const topCount = Math.ceil(n / 2);
+  const bottomCount = n - topCount;
+  const seatOffsetY = tableH / 2 + CHAIR_GAP + CHAIR_SIZE / 2;
+  const backOffsetY = seatOffsetY + CHAIR_SIZE * 0.6;
+  const spread = (count: number, seatY: number, backY: number) => {
+    if (count === 0) return;
+    const usableWidth = tableW * 0.8;
+    const step = count > 1 ? usableWidth / (count - 1) : 0;
+    const startX = count > 1 ? -usableWidth / 2 : 0;
+    for (let i = 0; i < count; i++) {
+      const x = count > 1 ? startX + step * i : 0;
+      specs.push({ seatX: x, seatY, backX: x, backY });
+    }
+  };
+  spread(topCount, -seatOffsetY, -backOffsetY);
+  spread(bottomCount, seatOffsetY, backOffsetY);
+  return specs;
+}
+
+/**
+ * One table on the floor plan: a wood tabletop (with a darker edge for
+ * depth) surrounded by chair-shaped marks (seat + backrest), positioned
+ * absolutely within the floor-plan canvas from the table's normalized
+ * (0–1) x/y. Rotation is applied only to the tabletop+number group, not
+ * the status chip/total below, so those stay readable regardless of angle.
+ */
+function FloorPlanTable({
+  entry,
+  occupied,
+  orderCount,
+  total,
+  canvasWidth,
+  canvasHeight,
+  onPress,
+}: {
+  entry: TableLayoutEntry;
+  occupied: boolean;
+  orderCount: number;
+  total: number;
+  canvasWidth: number;
+  canvasHeight: number;
+  onPress: () => void;
+}) {
+  const shape: TableShape = entry.shape ?? "rect";
+  const seats = entry.seats ?? 4;
+  const tableW = 46 + seats * 6;
+  const tableH = shape === "round" ? tableW : Math.round(tableW * 0.62);
+  const chairSpecs = getChairSpecs(shape, seats, tableW, tableH);
+  const padding = CHAIR_SIZE + CHAIR_GAP + 8;
+  const svgW = tableW + padding * 2;
+  const svgH = tableH + padding * 2;
+  const cx = svgW / 2;
+  const cy = svgH / 2;
+  const status = occupied ? STATUS_COLORS.occupied : STATUS_COLORS.empty;
+  const numberFontSize = Math.max(20, Math.round(tableW * 0.3));
+
+  const left = entry.x * canvasWidth - svgW / 2;
+  const top = entry.y * canvasHeight - svgH / 2;
+
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`Table ${entry.id}`}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.floorTableWrap,
+        { left, top, width: svgW },
+        pressed && styles.tableCardPressed,
+      ]}
+    >
+      <View style={[styles.tableShadow, { transform: [{ rotate: `${entry.rotation ?? 0}deg` }] }]}>
+        <Svg width={svgW} height={svgH}>
+          {chairSpecs.map((c, i) => (
+            <Fragment key={i}>
+              <Rect
+                x={cx + c.backX - CHAIR_SIZE / 2}
+                y={cy + c.backY - 3}
+                width={CHAIR_SIZE}
+                height={6}
+                rx={2}
+                fill={CHAIR_COLOR}
+              />
+              <Rect
+                x={cx + c.seatX - CHAIR_SIZE / 2}
+                y={cy + c.seatY - CHAIR_SIZE / 2}
+                width={CHAIR_SIZE}
+                height={CHAIR_SIZE}
+                rx={3}
+                fill={CHAIR_COLOR}
+              />
+            </Fragment>
+          ))}
+          {shape === "round" ? (
+            <>
+              <Circle cx={cx} cy={cy} r={tableW / 2} fill={WOOD_TABLE_EDGE} />
+              <Circle
+                cx={cx}
+                cy={cy}
+                r={tableW / 2 - 3}
+                fill={WOOD_TABLE_FILL}
+                stroke={status.ring}
+                strokeWidth={3.5}
+              />
+            </>
+          ) : (
+            <>
+              <Rect
+                x={cx - tableW / 2}
+                y={cy - tableH / 2}
+                width={tableW}
+                height={tableH}
+                rx={12}
+                fill={WOOD_TABLE_EDGE}
+              />
+              <Rect
+                x={cx - tableW / 2 + 3}
+                y={cy - tableH / 2 + 3}
+                width={tableW - 6}
+                height={tableH - 6}
+                rx={9}
+                fill={WOOD_TABLE_FILL}
+                stroke={status.ring}
+                strokeWidth={3.5}
+              />
+            </>
+          )}
+        </Svg>
+        <View style={styles.floorTableNumberWrap} pointerEvents="none">
+          <Text style={[styles.floorTableNumber, { fontSize: numberFontSize }]}>
+            {entry.id}
+          </Text>
+        </View>
+      </View>
+      <View style={styles.floorTableLabelWrap} pointerEvents="none">
+        <View style={[styles.statusChip, { backgroundColor: status.chipBg }]}>
+          <Text style={[styles.statusChipText, { color: status.chipText }]}>
+            {occupied ? "Occupied" : "Empty"}
+          </Text>
+        </View>
+        {occupied ? <Text style={styles.floorTableTotal}>${total.toFixed(2)}</Text> : null}
+      </View>
+    </Pressable>
+  );
+}
 
 function formatPlacedAt(iso: string): string {
   const d = new Date(iso);
@@ -83,6 +314,11 @@ export function TableMapScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  const onCanvasLayout = useCallback((e: LayoutChangeEvent) => {
+    const { width, height } = e.nativeEvent.layout;
+    setCanvasSize({ width, height });
+  }, []);
   /**
    * A frozen copy of a table's orders taken the instant `table_paid` fires
    * for whichever table the modal currently has open. `/api/orders/unpaid`
@@ -212,46 +448,31 @@ export function TableMapScreen() {
           </Pressable>
         </View>
       ) : (
-        <FlatList
-          data={TABLE_IDS}
-          keyExtractor={(id) => id}
-          numColumns={3}
-          contentContainerStyle={styles.grid}
-          columnWrapperStyle={styles.gridRow}
-          renderItem={({ item: tableId }) => {
-            const tableOrders = ordersByTable.get(tableId) ?? [];
-            const occupied = tableOrders.length > 0;
-            const total = tableOrders.reduce((sum, o) => sum + o.total_price, 0);
-            return (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={`Table ${tableId}`}
-                onPress={() => setSelectedTableId(tableId)}
-                style={({ pressed }) => [
-                  styles.tableCard,
-                  occupied && styles.tableCardOccupied,
-                  pressed && styles.tableCardPressed,
-                ]}
-              >
-                <View
-                  style={[
-                    styles.statusDot,
-                    { backgroundColor: occupied ? premium.runner : premium.border },
-                  ]}
-                />
-                <Text style={styles.tableLabel}>Table {tableId}</Text>
-                <Text style={styles.tableMeta}>
-                  {occupied
-                    ? `${tableOrders.length} order${tableOrders.length === 1 ? "" : "s"}`
-                    : "Empty"}
-                </Text>
-                {occupied ? (
-                  <Text style={styles.tableTotal}>${total.toFixed(2)}</Text>
-                ) : null}
-              </Pressable>
-            );
-          }}
-        />
+        <View style={styles.floorPlanOuter} onLayout={onCanvasLayout}>
+          <WoodFloorBackground width={canvasSize.width} height={canvasSize.height} />
+          {canvasSize.width > 0
+            ? TABLE_LAYOUT.map((entry) => {
+                const tableOrders = ordersByTable.get(entry.id) ?? [];
+                const occupied = tableOrders.length > 0;
+                const total = tableOrders.reduce(
+                  (sum, o) => sum + o.total_price,
+                  0
+                );
+                return (
+                  <FloorPlanTable
+                    key={entry.id}
+                    entry={entry}
+                    occupied={occupied}
+                    orderCount={tableOrders.length}
+                    total={total}
+                    canvasWidth={canvasSize.width}
+                    canvasHeight={canvasSize.height}
+                    onPress={() => setSelectedTableId(entry.id)}
+                  />
+                );
+              })
+            : null}
+        </View>
       )}
 
       <Modal
@@ -374,30 +595,73 @@ const styles = StyleSheet.create({
   },
   retryBtnText: { color: "#fff", fontWeight: "700", fontSize: 16 },
 
-  grid: { paddingHorizontal: 16, paddingBottom: 24, gap: 14 },
-  gridRow: { gap: 14 },
-  tableCard: {
-    flex: 1,
-    backgroundColor: premium.ivory,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: premium.border,
-    paddingVertical: 20,
-    paddingHorizontal: 12,
-    alignItems: "center",
-    gap: 6,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    elevation: 4,
-  },
-  tableCardOccupied: { borderColor: premium.runner, borderWidth: 1.5 },
   tableCardPressed: { opacity: 0.9, transform: [{ scale: 0.98 }] },
-  statusDot: { width: 10, height: 10, borderRadius: 5, marginBottom: 4 },
-  tableLabel: { fontSize: 17, fontWeight: "800", color: premium.charcoal },
-  tableMeta: { fontSize: 12, color: premium.muted, fontWeight: "600" },
-  tableTotal: { fontSize: 14, fontWeight: "800", color: premium.goldDark },
+
+  // Floor plan — a fixed-aspect "room" canvas that tables are absolutely
+  // positioned within, via normalized (0-1) coordinates scaled to its
+  // measured pixel size. Capped max width keeps it from stretching too
+  // wide on large iPads; aspectRatio keeps it responsive at any width.
+  floorPlanOuter: {
+    marginHorizontal: 16,
+    marginBottom: 24,
+    width: "100%",
+    maxWidth: 820,
+    alignSelf: "center",
+    aspectRatio: 1.35,
+    backgroundColor: "#B9814A",
+    borderRadius: 20,
+    borderWidth: 4,
+    borderColor: "#6B4423",
+    position: "relative",
+    overflow: "hidden",
+  },
+  floorTableWrap: {
+    position: "absolute",
+    alignItems: "center",
+  },
+  tableShadow: {
+    shadowColor: "#3D2410",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.35,
+    shadowRadius: 5,
+    elevation: 6,
+  },
+  floorTableNumberWrap: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  floorTableNumber: {
+    fontWeight: "800",
+    color: "#5C3A21",
+    textShadowColor: "rgba(255,255,255,0.35)",
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 1,
+  },
+  floorTableLabelWrap: {
+    marginTop: 6,
+    alignItems: "center",
+    gap: 3,
+  },
+  statusChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 10,
+  },
+  statusChipText: {
+    fontSize: 11,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  floorTableTotal: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#FFFFFF",
+    textShadowColor: "rgba(0,0,0,0.45)",
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
 
   modalBackdrop: {
     flex: 1,

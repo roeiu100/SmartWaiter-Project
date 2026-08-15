@@ -176,6 +176,7 @@ export function ManagerScreen({ navigation }: Props) {
   const [newDishDescription, setNewDishDescription] = useState("");
   const [newDishPrice, setNewDishPrice] = useState("");
   const [newDishCategory, setNewDishCategory] = useState("");
+  const [newDishSubcategory, setNewDishSubcategory] = useState("");
   const [newDishAllergens, setNewDishAllergens] = useState("");
   const [newDishIngredients, setNewDishIngredients] = useState("");
   const [savingDish, setSavingDish] = useState(false);
@@ -317,6 +318,7 @@ export function ManagerScreen({ navigation }: Props) {
     setNewDishDescription("");
     setNewDishPrice("");
     setNewDishCategory("");
+    setNewDishSubcategory("");
     setNewDishAllergens("");
     setNewDishIngredients("");
     setEditingDishId(null);
@@ -340,6 +342,7 @@ export function ManagerScreen({ navigation }: Props) {
       Number.isFinite(dish.price) ? String(dish.price) : ""
     );
     setNewDishCategory(dish.category ?? "");
+    setNewDishSubcategory(dish.subcategory ?? "");
 
     const meta = dish.metadata ?? {};
     const allergensRaw = (meta as Record<string, unknown>).allergens;
@@ -394,6 +397,7 @@ export function ManagerScreen({ navigation }: Props) {
   const saveNewDish = useCallback(async () => {
     const name = newDishName.trim();
     const category = newDishCategory.trim();
+    const subcategory = newDishSubcategory.trim();
     const priceNum = Number.parseFloat(newDishPrice.replace(",", "."));
 
     if (!name) {
@@ -401,7 +405,7 @@ export function ManagerScreen({ navigation }: Props) {
       return;
     }
     if (!category) {
-      Alert.alert("Missing category", "Please enter a category (e.g. starters).");
+      Alert.alert("Missing category", "Please enter a category (e.g. food).");
       return;
     }
     if (!Number.isFinite(priceNum) || priceNum < 0) {
@@ -444,6 +448,7 @@ export function ManagerScreen({ navigation }: Props) {
           description: description.length > 0 ? description : null,
           price: priceNum,
           category: category.toLowerCase(),
+          subcategory: subcategory.length > 0 ? subcategory.toLowerCase() : null,
           metadata: metadata ?? null,
         });
         setMenuItems((prev) =>
@@ -457,6 +462,7 @@ export function ManagerScreen({ navigation }: Props) {
           description: description.length > 0 ? description : null,
           price: priceNum,
           category: category.toLowerCase(),
+          subcategory: subcategory.length > 0 ? subcategory.toLowerCase() : null,
           is_available: true,
           metadata,
         });
@@ -479,6 +485,7 @@ export function ManagerScreen({ navigation }: Props) {
     editingDishId,
     newDishAllergens,
     newDishCategory,
+    newDishSubcategory,
     newDishDescription,
     newDishIngredients,
     newDishName,
@@ -574,10 +581,13 @@ export function ManagerScreen({ navigation }: Props) {
   );
 
   // Group menu items into collapsible category sections. Priority order
-  // mirrors the guest menu (Starters → Main Courses → Desserts → Drinks →
-  // everything else alphabetically) so the manager sees the same layout
-  // guests do. Rows are flattened into a mixed header/item array so the
-  // existing FlatList can keep windowed rendering for large menus.
+  // mirrors the guest menu (Food → Desserts → Drinks → everything else
+  // alphabetically), and — new — within Food, items with a `subcategory`
+  // (starters/mains) get their own header ("Food — Starters", "Food —
+  // Mains") instead of one flat Food group; untagged Food items still fall
+  // into one plain "Food" group. Rows are flattened into a mixed
+  // header/item array so the existing FlatList can keep windowed rendering
+  // for large menus.
   type MenuRow =
     | {
         kind: "header";
@@ -592,10 +602,21 @@ export function ManagerScreen({ navigation }: Props) {
 
   const menuRows = useMemo<MenuRow[]>(() => {
     const CATEGORY_RANK: Record<string, number> = {
+      food: 0,
+      desserts: 1,
+      // Real data currently has "deserts" (one s) — accept both spellings
+      // so ordering is correct regardless of which one is on a given row.
+      deserts: 1,
+      drinks: 2,
+    };
+    const SUBCATEGORY_RANK: Record<string, number> = {
       starters: 0,
+      starter: 0,
+      appetizers: 0,
+      mains: 1,
+      main: 1,
+      "main course": 1,
       "main courses": 1,
-      desserts: 2,
-      drinks: 3,
     };
     const titleCase = (s: string) =>
       s
@@ -606,27 +627,43 @@ export function ManagerScreen({ navigation }: Props) {
 
     const groups = new Map<
       string,
-      { label: string; items: MenuItemRow[] }
+      {
+        label: string;
+        categoryKey: string;
+        subcategoryKey: string;
+        items: MenuItemRow[];
+      }
     >();
     for (const it of menuItems) {
-      const raw = (it.category ?? "").trim();
-      const key = raw.toLowerCase() || "uncategorized";
-      const label = raw ? titleCase(raw) : "Uncategorized";
-      const g = groups.get(key);
+      const rawCategory = (it.category ?? "").trim();
+      const categoryKey = rawCategory.toLowerCase() || "uncategorized";
+      const categoryLabel = rawCategory ? titleCase(rawCategory) : "Uncategorized";
+      const rawSubcategory = (it.subcategory ?? "").trim();
+      const subcategoryKey = rawSubcategory.toLowerCase();
+      const label = subcategoryKey
+        ? `${categoryLabel} — ${titleCase(rawSubcategory)}`
+        : categoryLabel;
+      const groupKey = `${categoryKey}::${subcategoryKey}`;
+      const g = groups.get(groupKey);
       if (g) {
         g.items.push(it);
       } else {
-        groups.set(key, { label, items: [it] });
+        groups.set(groupKey, { label, categoryKey, subcategoryKey, items: [it] });
       }
     }
 
     const sortedKeys = Array.from(groups.keys()).sort((a, b) => {
-      const ra = CATEGORY_RANK[a] ?? 99;
-      const rb = CATEGORY_RANK[b] ?? 99;
+      const ga = groups.get(a)!;
+      const gb = groups.get(b)!;
+      const ra = CATEGORY_RANK[ga.categoryKey] ?? 99;
+      const rb = CATEGORY_RANK[gb.categoryKey] ?? 99;
       if (ra !== rb) return ra - rb;
-      return (groups.get(a)!.label ?? "").localeCompare(
-        groups.get(b)!.label ?? ""
-      );
+      // Untagged items within a category (no subcategory yet) sort last;
+      // known subcategories (starters/mains) sort first in that order.
+      const sa = SUBCATEGORY_RANK[ga.subcategoryKey] ?? (ga.subcategoryKey ? 50 : 99);
+      const sb = SUBCATEGORY_RANK[gb.subcategoryKey] ?? (gb.subcategoryKey ? 50 : 99);
+      if (sa !== sb) return sa - sb;
+      return ga.label.localeCompare(gb.label);
     });
 
     const rows: MenuRow[] = [];
@@ -1044,7 +1081,7 @@ export function ManagerScreen({ navigation }: Props) {
                   <TextInput
                     value={newDishCategory}
                     onChangeText={setNewDishCategory}
-                    placeholder="e.g. starters"
+                    placeholder="e.g. food"
                     placeholderTextColor={premium.mutedLight}
                     style={styles.fieldInput}
                     autoCapitalize="none"
@@ -1052,6 +1089,17 @@ export function ManagerScreen({ navigation }: Props) {
                   />
                 </View>
               </View>
+
+              <Text style={styles.fieldLabel}>Subcategory (optional)</Text>
+              <TextInput
+                value={newDishSubcategory}
+                onChangeText={setNewDishSubcategory}
+                placeholder="e.g. starters or mains — only used within Food"
+                placeholderTextColor={premium.mutedLight}
+                style={styles.fieldInput}
+                autoCapitalize="none"
+                editable={!savingDish}
+              />
 
               <Text style={styles.fieldLabel}>Ingredients</Text>
               <TextInput

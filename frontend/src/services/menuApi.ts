@@ -37,6 +37,12 @@ function normalizeMenuItem(row: unknown): MenuItemRow {
   const description =
     desc == null || desc === "" ? undefined : String(desc);
 
+  const subcategoryRaw = r.subcategory;
+  const subcategory =
+    subcategoryRaw == null || subcategoryRaw === ""
+      ? undefined
+      : String(subcategoryRaw);
+
   const metaRaw = r.metadata;
   const metadata =
     metaRaw && typeof metaRaw === "object" && !Array.isArray(metaRaw)
@@ -48,6 +54,7 @@ function normalizeMenuItem(row: unknown): MenuItemRow {
     name: String(r.name ?? ""),
     price,
     category: String(r.category ?? "General"),
+    subcategory,
     is_available: r.is_available !== false,
     description,
     metadata,

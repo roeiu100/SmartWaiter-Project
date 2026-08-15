@@ -22,6 +22,8 @@ export interface MenuItemRow {
   name: string;
   price: number;
   category: string;
+  /** Second-level grouping within category (e.g. category=food, subcategory=starters|mains). */
+  subcategory?: string | null;
   is_available: boolean;
   /** Optional in DB — add column if missing */
   description?: string | null;
@@ -34,6 +36,8 @@ export interface MenuItemCreatePayload {
   description?: string | null;
   price: number;
   category: string;
+  /** Second-level grouping within category (e.g. category=food, subcategory=starters|mains). */
+  subcategory?: string | null;
   is_available?: boolean;
   /** Pass `null` to clear the column (used by PATCH for edits). */
   metadata?: MenuItemMetadata | null;

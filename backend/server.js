@@ -418,7 +418,12 @@ function formatMenuForPrompt(menuRows) {
     }
 
     const price = Number(row?.price ?? 0);
-    const category = titleCaseCategory(row?.category);
+    // Group by the more specific subcategory when present (e.g. category=food,
+    // subcategory=starters -> "Starters") — the model only needs flat,
+    // orderable groups, not the "food" wrapper concept.
+    const subcategoryRaw =
+      typeof row?.subcategory === "string" ? row.subcategory.trim() : "";
+    const category = titleCaseCategory(subcategoryRaw || row?.category);
     const meta =
       row?.metadata && typeof row.metadata === "object" ? row.metadata : null;
 
@@ -485,6 +490,8 @@ app.post("/api/menu", async (req, res) => {
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const categoryRaw =
       typeof body.category === "string" ? body.category.trim() : "";
+    const subcategoryRaw =
+      typeof body.subcategory === "string" ? body.subcategory.trim() : "";
     const priceNum =
       typeof body.price === "number" ? body.price : Number(body.price);
 
@@ -519,6 +526,7 @@ app.post("/api/menu", async (req, res) => {
       description,
       price: priceNum,
       category: categoryRaw.toLowerCase(),
+      subcategory: subcategoryRaw ? subcategoryRaw.toLowerCase() : null,
       is_available: isAvailable,
       metadata,
     };
@@ -603,6 +611,15 @@ app.patch("/api/menu/:id", async (req, res) => {
         return res.status(400).json({ error: "'category' cannot be empty" });
       }
       patch.category = c.toLowerCase();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, "subcategory")) {
+      if (body.subcategory == null) {
+        patch.subcategory = null;
+      } else if (typeof body.subcategory === "string") {
+        const sc = body.subcategory.trim();
+        patch.subcategory = sc.length > 0 ? sc.toLowerCase() : null;
+      }
     }
 
     if (typeof body.is_available === "boolean") {

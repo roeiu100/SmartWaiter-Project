@@ -7,6 +7,7 @@ import {
   FlatList,
   Platform,
   Pressable,
+  SectionList,
   StyleSheet,
   Text,
   TextInput,
@@ -29,12 +30,23 @@ type Props = NativeStackScreenProps<CustomerStackParamList, "Guest">;
  */
 function categoryRank(name: string): number {
   const n = name.toLowerCase().trim();
+  if (n === "food") return 0;
+  if (n === "desserts" || n === "dessert" || n === "deserts" || n === "desert") return 1;
+  if (n === "drinks" || n === "drink") return 2;
+  return 3;
+}
+
+/**
+ * Within the Food category, items with a `subcategory` (starters/mains)
+ * get their own subheading, in this order; untagged items sort last.
+ */
+function subcategoryRank(name: string): number {
+  const n = name.toLowerCase().trim();
   if (n === "starters" || n === "starter" || n === "appetizers") return 0;
   if (n === "main courses" || n === "main course" || n === "mains" || n === "main")
     return 1;
-  if (n === "desserts" || n === "dessert") return 2;
-  if (n === "drinks" || n === "drink") return 3;
-  return 4;
+  if (!n) return 99;
+  return 50;
 }
 
 function titleCase(name: string): string {
@@ -254,11 +266,43 @@ export function GuestMenuScreen({ route }: Props) {
     }
   }, [categories, selectedCategory]);
 
-  const itemsInCategory: MenuItemRow[] = useMemo(() => {
+  interface ItemSection {
+    key: string;
+    /** Empty string = no visible subheading (Desserts/Drinks, or untagged Food items). */
+    title: string;
+    data: MenuItemRow[];
+  }
+
+  /**
+   * Groups the selected category's items by `subcategory` (e.g. Food ->
+   * Starters / Main Courses). Categories with no subcategory data at all
+   * (Desserts, Drinks, or Food before it's tagged) collapse to a single
+   * section with an empty title, which renders with no visible subheading
+   * — i.e. pixel-identical to the old flat list.
+   */
+  const itemSectionsInCategory: ItemSection[] = useMemo(() => {
     if (!selectedCategory) return [];
-    return menuItems.filter(
+    const items = menuItems.filter(
       (m) => m.is_available && m.category === selectedCategory
     );
+    const bySub = new Map<string, MenuItemRow[]>();
+    for (const it of items) {
+      const sub = (it.subcategory ?? "").trim().toLowerCase();
+      const arr = bySub.get(sub) ?? [];
+      arr.push(it);
+      bySub.set(sub, arr);
+    }
+    const keys = Array.from(bySub.keys()).sort((a, b) => {
+      const ra = subcategoryRank(a);
+      const rb = subcategoryRank(b);
+      if (ra !== rb) return ra - rb;
+      return a.localeCompare(b);
+    });
+    return keys.map((key) => ({
+      key: key || "__untagged__",
+      title: key ? titleCase(key) : "",
+      data: bySub.get(key)!,
+    }));
   }, [menuItems, selectedCategory]);
 
   const renderCategoryCard = useCallback(
@@ -395,11 +439,12 @@ export function GuestMenuScreen({ route }: Props) {
           renderItem={renderCategoryCard}
         />
       ) : (
-        <FlatList
+        <SectionList
           style={styles.listFlex}
-          data={itemsInCategory}
+          sections={itemSectionsInCategory}
           keyExtractor={(m) => m.id}
           showsVerticalScrollIndicator={false}
+          stickySectionHeadersEnabled={false}
           contentContainerStyle={[
             styles.listContent,
             { paddingBottom: listPaddingBottom },
@@ -421,6 +466,11 @@ export function GuestMenuScreen({ route }: Props) {
                 {titleCase(selectedCategory)}
               </Text>
             </View>
+          }
+          renderSectionHeader={({ section }) =>
+            section.title ? (
+              <Text style={styles.subcategoryHeader}>{section.title}</Text>
+            ) : null
           }
           ListEmptyComponent={
             <Text style={styles.emptyMenu}>No items in this section.</Text>
@@ -595,6 +645,15 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: premium.charcoal,
     letterSpacing: -0.6,
+  },
+  subcategoryHeader: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: premium.goldDark,
+    textTransform: "uppercase",
+    letterSpacing: 1.5,
+    marginTop: 8,
+    marginBottom: 8,
   },
 
   tablePanel: {

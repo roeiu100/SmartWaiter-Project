@@ -125,18 +125,20 @@ function cartLinesFromStore(): ChatCartLine[] {
 
 function categoryRank(name: string): number {
   const n = name.toLowerCase().trim();
+  if (n === "food") return 0;
+  if (n === "desserts" || n === "dessert" || n === "deserts" || n === "desert") return 1;
+  if (n === "drinks" || n === "drink") return 2;
+  return 3;
+}
+
+/** Within Food, Starters sort before Main Courses; untagged items sort last. */
+function subcategoryRank(name: string): number {
+  const n = name.toLowerCase().trim();
   if (n === "starters" || n === "starter" || n === "appetizers") return 0;
-  if (
-    n === "main courses" ||
-    n === "main course" ||
-    n === "mains" ||
-    n === "main" ||
-    n === "food"
-  )
+  if (n === "main courses" || n === "main course" || n === "mains" || n === "main")
     return 1;
-  if (n === "desserts" || n === "dessert") return 2;
-  if (n === "drinks" || n === "drink") return 3;
-  return 4;
+  if (!n) return 99;
+  return 50;
 }
 
 function titleCaseCategory(name: string): string {
@@ -151,32 +153,52 @@ function formatMenuPrice(price: number): string {
 
 type MenuSection = {
   title: string;
+  categoryRankValue: number;
+  subcategoryRankValue: number;
   data: MenuItemRow[];
 };
 
+/**
+ * One section per (category, subcategory) pair — e.g. Food splits into
+ * "Food · Starters" and "Food · Main Courses" once items are tagged;
+ * categories with no subcategory data (Desserts, Drinks, untagged Food)
+ * get one plain section titled just by category, same as before.
+ */
 function buildMenuSections(items: MenuItemRow[]): MenuSection[] {
-  const byCat = new Map<string, MenuItemRow[]>();
+  const byGroup = new Map<string, MenuItemRow[]>();
   for (const item of items) {
     if (!item.is_available) continue;
-    const key = item.category.trim() || "General";
-    const arr = byCat.get(key) ?? [];
+    const categoryKey = item.category.trim() || "General";
+    const subcategoryKey = (item.subcategory ?? "").trim();
+    const groupKey = `${categoryKey.toLowerCase()}::${subcategoryKey.toLowerCase()}`;
+    const arr = byGroup.get(groupKey) ?? [];
     arr.push(item);
-    byCat.set(key, arr);
+    byGroup.set(groupKey, arr);
   }
 
   const sections: MenuSection[] = [];
-  for (const [key, data] of byCat.entries()) {
+  for (const [groupKey, data] of byGroup.entries()) {
+    const [categoryKey, subcategoryKey] = groupKey.split("::");
     data.sort((a, b) => a.name.localeCompare(b.name));
+    const categoryLabel = titleCaseCategory(categoryKey);
+    const title = subcategoryKey
+      ? `${categoryLabel} · ${titleCaseCategory(subcategoryKey)}`
+      : categoryLabel;
     sections.push({
-      title: titleCaseCategory(key),
+      title,
+      categoryRankValue: categoryRank(categoryKey),
+      subcategoryRankValue: subcategoryRank(subcategoryKey),
       data,
     });
   }
 
   sections.sort((a, b) => {
-    const ra = categoryRank(a.title);
-    const rb = categoryRank(b.title);
-    if (ra !== rb) return ra - rb;
+    if (a.categoryRankValue !== b.categoryRankValue) {
+      return a.categoryRankValue - b.categoryRankValue;
+    }
+    if (a.subcategoryRankValue !== b.subcategoryRankValue) {
+      return a.subcategoryRankValue - b.subcategoryRankValue;
+    }
     return a.title.localeCompare(b.title);
   });
 
