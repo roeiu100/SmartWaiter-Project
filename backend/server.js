@@ -11,7 +11,7 @@ const { createClient } = require("@supabase/supabase-js");
 const Groq = require("groq-sdk").default;
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 /** Set after `new Server(...)` — used from HTTP handlers to push realtime events. */
 let io;
@@ -1775,7 +1775,10 @@ ${compactMenu}`;
 const server = http.createServer(app);
 
 io = new Server(server, {
-  cors: { origin: "*" },
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+  },
 });
 
 /** Broadcast the current blocklist to every connected client. */

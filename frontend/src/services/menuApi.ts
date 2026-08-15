@@ -4,8 +4,8 @@ import type {
   RunnerOptionRow,
 } from "../types/database";
 
-/** Point to your machine’s LAN IP when testing on a device or simulator. */
-export const MENU_API_BASE = process.env.EXPO_PUBLIC_API_URL;
+/** Public API base URL (local LAN IP or Render URL via EXPO_PUBLIC_API_URL). */
+export const MENU_API_BASE = process.env.EXPO_PUBLIC_API_URL?.trim();
 
 export async function fetchMenuFromApi(): Promise<MenuItemRow[]> {
   const res = await fetch(`${MENU_API_BASE}/api/menu`, {
