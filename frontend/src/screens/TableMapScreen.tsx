@@ -18,6 +18,7 @@ import { MENU_API_BASE } from "../services/menuApi";
 import {
   cancelOrderItem,
   fetchUnpaidOrders,
+  payForTable,
   resolveCancellationRequest,
   type ActiveOrder,
   type ActiveOrderItem,
@@ -46,7 +47,17 @@ const CHAIR_COLOR = "#5C3A21";
 const STATUS_COLORS = {
   empty: { ring: "#22C55E", chipBg: "rgba(34,197,94,0.16)", chipText: "#15803D" },
   occupied: { ring: "#F97316", chipBg: "rgba(249,115,22,0.18)", chipText: "#C2410C" },
+  // Every item on the table's order(s) has been canceled — nothing left to
+  // serve or charge for, but the table still counts as "occupied" until a
+  // manager explicitly closes it out (see allItemsCanceled / Close Order).
+  readyToClose: { ring: "#6B7280", chipBg: "rgba(107,114,128,0.18)", chipText: "#374151" },
 };
+
+/** True once every item across a table's unpaid orders has been canceled. */
+function allItemsCanceled(orders: ActiveOrder[]): boolean {
+  const items = orders.flatMap((o) => o.items);
+  return items.length > 0 && items.every((it) => it.status === "canceled");
+}
 
 /** A full-bleed wood-plank floor texture, purely SVG (no image assets). */
 function WoodFloorBackground({ width, height }: { width: number; height: number }) {
@@ -143,6 +154,7 @@ function getChairSpecs(
 function FloorPlanTable({
   entry,
   occupied,
+  readyToClose,
   orderCount,
   total,
   canvasWidth,
@@ -151,6 +163,7 @@ function FloorPlanTable({
 }: {
   entry: TableLayoutEntry;
   occupied: boolean;
+  readyToClose: boolean;
   orderCount: number;
   total: number;
   canvasWidth: number;
@@ -167,7 +180,11 @@ function FloorPlanTable({
   const svgH = tableH + padding * 2;
   const cx = svgW / 2;
   const cy = svgH / 2;
-  const status = occupied ? STATUS_COLORS.occupied : STATUS_COLORS.empty;
+  const status = readyToClose
+    ? STATUS_COLORS.readyToClose
+    : occupied
+      ? STATUS_COLORS.occupied
+      : STATUS_COLORS.empty;
   const numberFontSize = Math.max(20, Math.round(tableW * 0.3));
 
   const left = entry.x * canvasWidth - svgW / 2;
@@ -250,7 +267,7 @@ function FloorPlanTable({
       <View style={styles.floorTableLabelWrap} pointerEvents="none">
         <View style={[styles.statusChip, { backgroundColor: status.chipBg }]}>
           <Text style={[styles.statusChipText, { color: status.chipText }]}>
-            {occupied ? "Occupied" : "Empty"}
+            {readyToClose ? "Close order" : occupied ? "Occupied" : "Empty"}
           </Text>
         </View>
         {occupied ? <Text style={styles.floorTableTotal}>${total.toFixed(2)}</Text> : null}
@@ -333,6 +350,7 @@ export function TableMapScreen() {
   } | null>(null);
   const [cancelReasonText, setCancelReasonText] = useState("");
   const [cancelSubmitting, setCancelSubmitting] = useState(false);
+  const [closingTable, setClosingTable] = useState(false);
   const [orders, setOrders] = useState<ActiveOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -445,6 +463,11 @@ export function TableMapScreen() {
     (sum, o) => sum + o.total_price,
     0
   );
+  // Every item on this table's order(s) has been canceled — nothing left to
+  // serve or charge for. Gates the "Close Order" button (never shown once
+  // the table's already been closed/paid, i.e. isJustPaidView).
+  const selectedTableAllCanceled =
+    !isJustPaidView && allItemsCanceled(selectedOrders);
 
   const closeModal = useCallback(() => {
     setSelectedTableId(null);
@@ -455,6 +478,37 @@ export function TableMapScreen() {
     console.log("[TableMap] Print bill stub", selectedTableId, selectedOrders);
     Alert.alert("Print Bill", "Printing is not yet implemented.");
   }, [selectedTableId, selectedOrders]);
+
+  const onCloseOrder = useCallback(async () => {
+    if (!selectedTableId) return;
+    // Belt-and-suspenders: re-check right before the call, not just at
+    // render time, in case items changed between renders (e.g. a fresh
+    // cancellation request just got approved by someone else) — never close
+    // out a table that still has an active item on it.
+    if (!allItemsCanceled(ordersByTable.get(selectedTableId) ?? [])) {
+      Alert.alert(
+        "Cannot close order",
+        "This table still has active items on its order."
+      );
+      return;
+    }
+    setClosingTable(true);
+    try {
+      await payForTable(selectedTableId);
+      // The `table_paid` socket handler (below) also reloads + snapshots
+      // this table, but doing it here too means the UI updates immediately
+      // even if the socket round-trip is slow.
+      void loadOrders({ silent: true });
+    } catch (err) {
+      console.error("[TableMap] closeOrder (payForTable) failed:", err);
+      Alert.alert(
+        "Could not close order",
+        err instanceof Error ? err.message : "Please try again."
+      );
+    } finally {
+      setClosingTable(false);
+    }
+  }, [selectedTableId, ordersByTable, loadOrders]);
 
   const openCancelPrompt = useCallback((orderId: string, item: ActiveOrderItem) => {
     setCancelTarget({ orderId, itemId: item.id, itemName: item.menu_item_name });
@@ -601,6 +655,7 @@ export function TableMapScreen() {
             ? TABLE_LAYOUT.map((entry) => {
                 const tableOrders = ordersByTable.get(entry.id) ?? [];
                 const occupied = tableOrders.length > 0;
+                const readyToClose = occupied && allItemsCanceled(tableOrders);
                 const total = tableOrders.reduce(
                   (sum, o) => sum + o.total_price,
                   0
@@ -610,6 +665,7 @@ export function TableMapScreen() {
                     key={entry.id}
                     entry={entry}
                     occupied={occupied}
+                    readyToClose={readyToClose}
                     orderCount={tableOrders.length}
                     total={total}
                     canvasWidth={canvasSize.width}
@@ -645,7 +701,9 @@ export function TableMapScreen() {
             {isJustPaidView ? (
               <View style={styles.paidBanner}>
                 <Text style={styles.paidBannerText}>
-                  ✓ Bill paid — table cleared for the next guest
+                  {selectedTotal === 0
+                    ? "✓ Order closed — table cleared for the next guest"
+                    : "✓ Bill paid — table cleared for the next guest"}
                 </Text>
               </View>
             ) : null}
@@ -734,17 +792,34 @@ export function TableMapScreen() {
                 <Text style={styles.modalTotalLabel}>Total</Text>
                 <Text style={styles.modalTotal}>${selectedTotal.toFixed(2)}</Text>
               </View>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Print Bill"
-                onPress={onPrintBill}
-                style={({ pressed }) => [
-                  styles.printBtn,
-                  pressed && styles.printBtnPressed,
-                ]}
-              >
-                <Text style={styles.printBtnText}>Print Bill</Text>
-              </Pressable>
+              {isManager && selectedTableAllCanceled ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Close order — all items canceled"
+                  disabled={closingTable}
+                  onPress={() => void onCloseOrder()}
+                  style={({ pressed }) => [
+                    styles.closeOrderBtn,
+                    pressed && styles.printBtnPressed,
+                  ]}
+                >
+                  <Text style={styles.closeOrderBtnText}>
+                    {closingTable ? "Closing…" : "Close Order"}
+                  </Text>
+                </Pressable>
+              ) : (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Print Bill"
+                  onPress={onPrintBill}
+                  style={({ pressed }) => [
+                    styles.printBtn,
+                    pressed && styles.printBtnPressed,
+                  ]}
+                >
+                  <Text style={styles.printBtnText}>Print Bill</Text>
+                </Pressable>
+              )}
             </View>
           </View>
 
@@ -1037,6 +1112,13 @@ const styles = StyleSheet.create({
   },
   printBtnPressed: { opacity: 0.85 },
   printBtnText: { color: premium.navAccent, fontWeight: "700", fontSize: 14 },
+  closeOrderBtn: {
+    backgroundColor: "#374151",
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 12,
+  },
+  closeOrderBtnText: { color: "#fff", fontWeight: "700", fontSize: 14 },
 
   pendingSection: {
     marginHorizontal: 20,
