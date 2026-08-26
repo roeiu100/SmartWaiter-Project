@@ -324,7 +324,7 @@ async function createGroqChatCompletionWithTools({
   }
 }
 /** Groq retired `llama3-70b-8192`; see https://console.groq.com/docs/deprecations */
-const GROQ_CHAT_MODEL = "llama-3.3-70b-versatile";
+const GROQ_CHAT_MODEL = "openai/gpt-oss-120b";
 
 // Allow any origin (Expo, physical device, emulators) — tighten for production.
 app.use(
