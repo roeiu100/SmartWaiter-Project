@@ -103,7 +103,10 @@ CHECK / BILL REQUESTS (CRITICAL — separate flow from food ordering and runner 
 If the guest asks for the check, the bill, to pay, or to close out (any language, e.g. "can I get the check", "החשבון בבקשה"), do not call 'update_cart' or 'submit_order'. Immediately call 'request_check' ONCE; 'guest_reply' briefly confirms you're bringing up their bill. No follow-up question after.
 
 ITEM CANCELLATION REQUESTS (CRITICAL — separate flow from food ordering):
-If the guest asks to cancel, remove, or take back a dish that was ALREADY sent to the kitchen (i.e. ordered in an earlier turn via 'submit_order' — NOT an item still being discussed before submission, which is a plain 'update_cart' with quantity 0), do not call 'update_cart'. Immediately call 'request_item_cancellation' ONCE with the item's name and a short reason drawn from what the guest said. This does NOT cancel the dish immediately — it only files a request for the manager to approve. Your 'guest_reply' must say you've flagged it for the manager to confirm — never promise it's already canceled or that it won't be charged.
+If the guest asks to cancel, remove, or take back a dish that was ALREADY sent to the kitchen (i.e. it appears in the "--- Already ordered ---" section below — NOT an item still being discussed before submission, which is a plain 'update_cart' with quantity 0), do not call 'update_cart'. Immediately call 'request_item_cancellation' ONCE with the item's name (exactly as it appears in "--- Already ordered ---") and a short reason drawn from what the guest said. This does NOT cancel the dish immediately — it only files a request for the manager to approve. Your 'guest_reply' must say you've flagged it for the manager to confirm — never promise it's already canceled or that it won't be charged. If the item is tagged "[cancellation already requested]" in that section, tell the guest it's already awaiting the manager's review — do not call the tool again for it.
+
+ORDER STATE IS AUTHORITATIVE, NOT YOUR MEMORY (CRITICAL):
+The "--- Already ordered ---" section below is fetched fresh from the kitchen system on every single message you receive — it is always current, even if this is a brand-new conversation with no earlier turns (e.g. the guest closed and reopened the app after ordering). It is NOT the same thing as what you can recall from this chat's history. Whenever the guest asks what they ordered, whether an item is on their order, what their total is so far, or asks to cancel/change something already ordered, base your answer ONLY on "--- Already ordered ---" — never say a dish "isn't on the order" or "was never ordered" just because you don't see it earlier in this conversation.
 
 LANGUAGE: Reply only in the language the guest used most recently.
 </operational_instructions>`;
@@ -198,14 +201,14 @@ const GROQ_CHAT_TOOL_REQUEST_ITEM_CANCELLATION = {
   function: {
     name: "request_item_cancellation",
     description:
-      "File a request to cancel a dish already sent to the kitchen (already ordered via submit_order in an earlier turn). Does NOT cancel it immediately — a manager must approve. Invoke ONLY via native tool calling.",
+      "File a request to cancel a dish that's already on this table's order, per the \"--- Already ordered ---\" section of this prompt (fetched fresh from the kitchen system every turn, independent of chat history). Does NOT cancel it immediately — a manager must approve. Invoke ONLY via native tool calling.",
     parameters: {
       type: "object",
       properties: {
         item_name: {
           type: "string",
           description:
-            "The already-ordered item's exact name as shown in the menu (e.g. \"Ribeye Steak\"). Must match a real menu item.",
+            "The item's exact name as it appears in the \"--- Already ordered ---\" section (e.g. \"Ribeye Steak\"). Must match a dish actually listed there.",
         },
         reason: {
           type: "string",
@@ -1627,6 +1630,81 @@ app.post("/api/orders/:id/items/:itemId/resolve-cancellation", async (req, res) 
 });
 
 /**
+ * Every order_item on a table's currently-open (unpaid) orders — the single
+ * authoritative "what has this table actually ordered" list, straight from
+ * the DB. Used for TWO things that must never disagree with each other:
+ *   1. Grounding the AI's prompt on every /api/chat turn (see
+ *      formatOrderStateForPrompt) — so a guest reopening the app and
+ *      starting a brand-new chat session doesn't make the AI "forget"
+ *      dishes it already sent to the kitchen. Conversation history is NOT
+ *      a reliable source of this; it resets on every fresh session while
+ *      the order itself lives on in Postgres.
+ *   2. Resolving `request_item_cancellation` by dish name (the AI only
+ *      knows a name, not an order/item id).
+ * Returned oldest-first; callers that want "most recent match" should scan
+ * from the end.
+ */
+async function fetchActiveTableOrderItems(tableId) {
+  const table = (tableId ?? "").toString().trim();
+  if (!table) return { items: [] };
+
+  const { data: orders, error } = await supabase
+    .from("orders")
+    .select(
+      `id, table_id, created_at,
+       order_items:order_items (
+         id, order_id, menu_item_id, quantity, unit_price, status, cancellation_status,
+         menu_items:menu_items ( id, name )
+       )`
+    )
+    .eq("table_id", table)
+    .is("paid_at", null)
+    .order("created_at", { ascending: true });
+  if (error) return { error };
+
+  const items = [];
+  for (const order of orders ?? []) {
+    for (const it of order.order_items ?? []) {
+      items.push({
+        orderId: order.id,
+        itemId: it.id,
+        menuItemId: it.menu_item_id,
+        name: it.menu_items?.name ?? "",
+        quantity: it.quantity,
+        unitPrice: Number(it.unit_price ?? 0),
+        status: it.status,
+        cancellationStatus: it.cancellation_status ?? "none",
+      });
+    }
+  }
+  return { items };
+}
+
+/**
+ * Renders fetchActiveTableOrderItems() output into the compact block
+ * injected into the AI's system prompt on every turn (see /api/chat). Non-
+ * canceled lines only — a canceled dish is simply gone, not "in the order".
+ */
+function formatOrderStateForPrompt(items) {
+  const live = (items ?? []).filter((it) => it.status !== "canceled");
+  if (live.length === 0) {
+    return "Nothing has been ordered yet for this table.";
+  }
+  let total = 0;
+  const lines = live.map((it) => {
+    const lineTotal = it.unitPrice * it.quantity;
+    total += lineTotal;
+    const pendingTag =
+      it.cancellationStatus === "requested"
+        ? " [cancellation already requested — awaiting manager approval; do NOT request again]"
+        : "";
+    return `${it.quantity}x ${it.name} ($${lineTotal.toFixed(2)}, ${it.status})${pendingTag}`;
+  });
+  lines.push(`Current order total so far: $${total.toFixed(2)}`);
+  return lines.join("\n");
+}
+
+/**
  * Used by the AI waiter's `request_item_cancellation` tool call — it only
  * knows a table id and a dish name, not an order/item id, so this resolves
  * the most recently-placed, still-active (non-canceled, not already
@@ -1641,40 +1719,23 @@ async function requestItemCancellationByName({ tableId, itemName, reason }) {
     return { error: { message: "Missing table or item name" } };
   }
 
-  const { data: orders, error: ordersErr } = await supabase
-    .from("orders")
-    .select(
-      `id, table_id, created_at,
-       order_items:order_items (
-         id, order_id, menu_item_id, quantity, status, cancellation_status,
-         menu_items:menu_items ( id, name )
-       )`
-    )
-    .eq("table_id", table)
-    .is("paid_at", null)
-    .order("created_at", { ascending: false });
-  if (ordersErr) {
-    return { error: ordersErr };
+  const { items, error: fetchErr } = await fetchActiveTableOrderItems(table);
+  if (fetchErr) {
+    return { error: fetchErr };
   }
 
   const needle = name.toLowerCase();
   let match = null;
-  for (const order of orders ?? []) {
-    for (const it of order.order_items ?? []) {
-      const itName = (it.menu_items?.name ?? "").trim().toLowerCase();
-      if (!itName || itName !== needle) continue;
-      if (it.status === "canceled") continue;
-      if (it.cancellation_status === "requested") continue;
-      match = {
-        orderId: order.id,
-        itemId: it.id,
-        menuItemId: it.menu_item_id,
-        quantity: it.quantity,
-        menuItemName: it.menu_items?.name ?? "",
-      };
-      break;
-    }
-    if (match) break;
+  // Items are oldest-first; scan backwards to prefer the most recently
+  // placed matching dish (e.g. two rounds of the same burger).
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    const itName = it.name.trim().toLowerCase();
+    if (!itName || itName !== needle) continue;
+    if (it.status === "canceled") continue;
+    if (it.cancellationStatus === "requested") continue;
+    match = it;
+    break;
   }
   if (!match) {
     return {
@@ -1704,7 +1765,7 @@ async function requestItemCancellationByName({ tableId, itemName, reason }) {
       item_id: match.itemId,
       table_id: table,
       menu_item_id: match.menuItemId,
-      menu_item_name: match.menuItemName,
+      menu_item_name: match.name,
       quantity: match.quantity,
       reason: cleanReason,
       requested_at: nowIso,
@@ -1982,13 +2043,31 @@ app.post("/api/chat", async (req, res) => {
 
     const runnerOptions = await fetchRunnerOptions();
 
+    // Fetched fresh on every single turn — deliberately NOT derived from
+    // `history`/`messages`, which resets whenever the guest starts a new
+    // chat session (e.g. reopening the app). The order itself lives in
+    // Postgres regardless of chat session, so this is the only reliable way
+    // for the AI to know what's actually been ordered.
+    const { items: currentOrderItems, error: orderStateError } =
+      await fetchActiveTableOrderItems(tableKey);
+    if (orderStateError) {
+      console.warn(
+        "[api/chat] fetchActiveTableOrderItems error:",
+        orderStateError
+      );
+    }
+    const orderStateText = formatOrderStateForPrompt(currentOrderItems);
+
     const compactMenu = formatMenuForPrompt(menuRows);
     const systemContent = `${SYSTEM_PROMPT}
 
 The following table service items are currently available: ${runnerOptions}. If the guest asks for a runner/table-service item that is NOT in this list, apologise and tell them it is not available — never silently substitute or invent.
 
 --- Menu ---
-${compactMenu}`;
+${compactMenu}
+
+--- Already ordered for this table (fetched fresh just now — this is the CURRENT, AUTHORITATIVE record; it is NOT the same thing as what you remember from earlier in this conversation, and it stays accurate even if this is a brand-new chat session) ---
+${orderStateText}`;
 
     const chatTools = buildGroqChatTools(runnerOptions);
 

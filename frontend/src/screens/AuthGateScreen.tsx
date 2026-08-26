@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAuthStore } from "../store/authStore";
@@ -24,25 +24,27 @@ export function AuthGateScreen() {
     [loginWithPin]
   );
 
-  const onKeyPress = useCallback(
-    (key: string) => {
-      if (key === "") return;
-      setError(false);
-      if (key === "del") {
-        setPin((p) => p.slice(0, -1));
-        return;
-      }
-      setPin((p) => {
-        if (p.length >= PIN_LENGTH) return p;
-        const next = p + key;
-        if (next.length === PIN_LENGTH) {
-          submit(next);
-        }
-        return next;
-      });
-    },
-    [submit]
-  );
+  // Runs AFTER render, once `pin` actually reaches 4 digits. Deliberately
+  // NOT called from inside the setPin updater in onKeyPress below — doing
+  // that synchronously triggered the authStore update (and thus
+  // StaffNavigator's re-render) while React was still processing this
+  // component's own pin-state update, which is what produced "Cannot update
+  // a component while rendering a different component".
+  useEffect(() => {
+    if (pin.length === PIN_LENGTH) {
+      submit(pin);
+    }
+  }, [pin, submit]);
+
+  const onKeyPress = useCallback((key: string) => {
+    if (key === "") return;
+    setError(false);
+    if (key === "del") {
+      setPin((p) => p.slice(0, -1));
+      return;
+    }
+    setPin((p) => (p.length >= PIN_LENGTH ? p : p + key));
+  }, []);
 
   return (
     <View style={styles.screen}>

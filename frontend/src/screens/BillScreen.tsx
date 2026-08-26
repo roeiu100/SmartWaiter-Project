@@ -198,16 +198,37 @@ export function BillScreen({ navigation }: Props) {
                 </Text>
                 <Text style={styles.statusBadge}>{item.status}</Text>
               </View>
-              {item.items.map((line) => (
-                <View key={line.id} style={styles.itemRow}>
-                  <Text style={styles.itemLine} numberOfLines={2}>
-                    {line.quantity} × {line.menu_item_name}
-                  </Text>
-                  <Text style={styles.itemPrice}>
-                    ${(line.unit_price * line.quantity).toFixed(2)}
-                  </Text>
-                </View>
-              ))}
+              {item.items.map((line) => {
+                const isCanceled = line.status === "canceled";
+                return (
+                  <View key={line.id} style={styles.itemRow}>
+                    <View style={styles.itemLineCol}>
+                      <Text
+                        style={[
+                          styles.itemLine,
+                          isCanceled && styles.itemLineCanceled,
+                        ]}
+                        numberOfLines={2}
+                      >
+                        {line.quantity} × {line.menu_item_name}
+                      </Text>
+                      {isCanceled ? (
+                        <View style={styles.canceledBadge}>
+                          <Text style={styles.canceledBadgeText}>Canceled</Text>
+                        </View>
+                      ) : null}
+                    </View>
+                    <Text
+                      style={[
+                        styles.itemPrice,
+                        isCanceled && styles.itemLineCanceled,
+                      ]}
+                    >
+                      ${(line.unit_price * line.quantity).toFixed(2)}
+                    </Text>
+                  </View>
+                );
+              })}
               <View style={styles.subtotalRow}>
                 <Text style={styles.subtotalLabel}>Subtotal</Text>
                 <Text style={styles.subtotalValue}>
@@ -361,10 +382,32 @@ const styles = StyleSheet.create({
   itemRow: {
     flexDirection: "row",
     justifyContent: "space-between",
+    alignItems: "flex-start",
     gap: 12,
   },
-  itemLine: { flex: 1, fontSize: 15, color: premium.charcoalSoft },
+  itemLineCol: { flex: 1, gap: 5 },
+  itemLine: { fontSize: 15, color: premium.charcoalSoft },
+  // Same treatment as the manager's Table Map (TableMapScreen.modalItemLineCanceled)
+  // so a canceled dish reads identically to both staff and the guest.
+  itemLineCanceled: {
+    textDecorationLine: "line-through",
+    color: premium.muted,
+  },
   itemPrice: { fontSize: 15, fontWeight: "700", color: premium.charcoal },
+  canceledBadge: {
+    alignSelf: "flex-start",
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 8,
+    backgroundColor: "rgba(107,114,128,0.14)",
+  },
+  canceledBadgeText: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: "#6B7280",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
   subtotalRow: {
     flexDirection: "row",
     justifyContent: "space-between",
