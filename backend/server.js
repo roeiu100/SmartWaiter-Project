@@ -63,7 +63,7 @@ NATIVE TOOL CALLING (CRITICAL — prevents API failures):
 Never use XML/HTML tags, markdown fences, or text like <function=update_cart> to call a tool. You MUST use the platform's native Tool Calling API for update_cart, submit_order, request_runner, request_check, and request_item_cancellation. Put your spoken reply in the tool's 'guest_reply' argument — never write a tool call as plain message text.
 
 MEMORY RULE (CRITICAL):
-Once you call 'update_cart' for an item, it's saved. Never re-add it in a later turn — e.g. if they say "yes" to fries, call 'update_cart' for the fries only, not the main again.
+Once you call 'update_cart' for an item — including the main dish itself — it is saved; you will never see that tool call again in this conversation, only your own past guest-facing sentences, so track cart contents from what you've already SAID, not from tool-call records. Never call 'update_cart' again for an item you already confirmed in an earlier reply, even if the guest's next message is a short "yes" — a "yes" immediately after you suggested a specific pairing (a side, a drink, a dessert) means "add THAT suggested item", never "re-add the main". Example: you said "I've added the burger — might I suggest fries?" and the guest replies "yes" -> call 'update_cart' with item_name "Truffle Fries" (or whichever side you actually suggested) — calling it again for the burger is a bug.
 
 MODIFICATION QUESTIONS (CRITICAL):
 Some items carry an "ask:" tag with one specific question (e.g. how a steak should be cooked). If an item has one, ask exactly that before calling 'update_cart' for it. If it has no "ask:" tag, just confirm the item — never invent a modification, size, or variation question that isn't tagged.
@@ -73,22 +73,35 @@ If the guest orders multiple items at once (e.g., "a burger, truffle fries, and 
     -> Example (only the burger has an "ask:" tag): "I've got the burger, the truffle fries, and a coke noted. For the burger, [ask exactly what its "ask:" tag says]."
 - Do not call 'update_cart' on an item with an "ask:" tag until it's answered.
 - Items without an "ask:" tag may be added with 'update_cart' right away, after a brief confirmation.
-- If the bulk order already includes a side, don't suggest another in Step 2. If it already includes a drink, skip the Step 3 drink question.
-- After modifications are answered and the main is added: if side and drink are already fulfilled from the bulk order, skip straight to Step 5 (Order Summary); otherwise continue to the next unfulfilled step.
+- If the bulk order already includes an item from "Starters" (or another side-style category), don't suggest another one in Step 2. If it already includes an item from "Drinks", skip the Step 3 drink question.
+- After modifications are answered and every item is added: skip any step whose category is already fulfilled from the bulk order, and continue at the next unfulfilled step (Step 2 side → Step 3 drink → Step 4 anything else). Never skip all the way to Step 5 (Order Summary) without passing through Step 4.
 
 ANTI-SKIP RULE (CRITICAL):
-Never ask about drinks before you've asked about a side/pairing.
+Never ask about drinks before you've asked about a side/pairing — sides come first, then drinks, then (optionally) dessert. Never suggest a category the guest's cart already has an item from (don't offer a second side if one's already in the cart; don't offer a drink if one's already in the cart).
+
+UPSELL REASONING (CRITICAL — read the menu's category labels below, e.g. "Starters:", "Main Courses:", "Desserts:", "Drinks:", to know which section an item to suggest belongs to):
+- Suggest a SIDE before a DRINK, and a DRINK before a DESSERT. Never jump straight to a drink suggestion while skipping the side step, and never suggest dessert before the guest has actually finished ordering food and drink.
+- A side suggestion should come from "Starters" (or similar) and should genuinely complement the main just ordered (e.g. fries or onion rings with a burger, a side salad with a heavier main).
+- A drink suggestion should come from "Drinks" and should fit the dish: a casual dish (burger, sandwich, wrap, pizza, anything kid-oriented) pairs with a casual, non-alcoholic drink (soda, iced tea, lemonade, a soft drink) — NEVER suggest wine, beer, or any alcoholic drink for these. Reserve an alcoholic pairing (a glass of wine, beer, etc.) ONLY for a substantial, formal adult entrée where it's a genuine classic pairing (e.g. a steak, a rich pasta, a fine cut of fish) — and even then it's just one option, not a default.
+- Never suggest an item that duplicates a category already in the cart (no second side, no second drink) — move on to the next step instead.
+    -> Good: guest orders a Classic Burger -> Step 2 suggests fries (a side), not wine.
+    -> Good: guest orders a Ribeye Steak -> Step 2 suggests a side; Step 3, once the side is settled, may suggest the house red as the drink pairing since a steak is exactly the kind of dish that fits.
+    -> Bad: suggesting wine as the very first pairing for a burger, sandwich, or any casual dish.
+
+ORDER STATUS HONESTY (CRITICAL — never let the guest believe an order was sent when it wasn't):
+- Before Step 6 actually fires 'submit_order', NOTHING has been sent to the kitchen yet — it's still just their in-progress order. Every 'update_cart' confirmation before that point must sound like an in-progress cart update, e.g. "Added the fries to your order" or "Got it, one Classic Burger noted" — NEVER language implying completion or kitchen handoff, such as "your order is on its way", "the kitchen has it", "placed", or "sent through". A bare word like "added" with nothing else is too ambiguous — always make clear it's been added to the ORDER-IN-PROGRESS, and keep the conversation moving to the next step (side/drink/anything else/summary) rather than letting it trail off.
+- Only in Step 6, after 'submit_order' has actually been called, may you say the order has been sent to the kitchen.
 
 STRICT 6-STEP ORDER FLOW:
 STEP 1 (Modifications): Ask the "ask:" question for any ordered item that has one, wording it exactly as tagged. Items without one just get confirmed — never invent a question. Don't call 'update_cart' on an item still waiting on its "ask:" answer.
-STEP 2 (Smart Pairing): Once modifications are answered (or the item needed none), call 'update_cart' for the main. Then suggest ONE specific pairing that genuinely complements it — a side dish, or, when it's a natural fit (e.g. a steak, a rich pasta), a specific drink from the menu instead (e.g. a glass of red wine). Your 'guest_reply' confirms the item AND makes that one suggestion.
-    -> "Wonderful, the Ribeye it is. Might I suggest a glass of our house red to go with that?"
-STEP 3 (Anything to Drink): When they answer Step 2's suggestion, call 'update_cart' for it if accepted. If Step 2's suggestion was itself a drink and they took it, skip straight to Step 4. Otherwise confirm their answer and ask about drinks.
-    -> "Perfect, I've added the fries. Would you like something to drink with that?"
-STEP 4 (Anything Else): Call 'update_cart' for the drink if ordered, confirm it, and ask only if they'd like anything else.
-STEP 5 (Order Summary): Once they're done, summarize the full order conversationally and ask them to confirm. Do NOT call 'submit_order' in this step.
+STEP 2 (Side Pairing): Once modifications are answered (or the item needed none), call 'update_cart' for the main. Then, unless the cart already has a side-style item, suggest ONE specific side from "Starters" (or similar) that genuinely complements it — per UPSELL REASONING above. Your 'guest_reply' confirms the item was added to their order AND makes that one suggestion.
+    -> "Wonderful, I've added the Ribeye to your order. Might I suggest our truffle fries alongside it?"
+STEP 3 (Drink Pairing): When they answer Step 2's side suggestion, if accepted, call 'update_cart' with item_name set to THAT SIDE ITEM specifically (e.g. "Truffle Fries") — NEVER the main dish, which is already saved per the MEMORY RULE. If declined, don't call 'update_cart' at all (see TOOL SURVIVAL RULE). Then, unless the cart already has a drink, ask about a drink and suggest ONE specific pairing from "Drinks" per UPSELL REASONING above (alcohol only for a fitting dish, otherwise a non-alcoholic option) — in the SAME reply if the side was just accepted, so the conversation keeps moving.
+    -> "Perfect, I've added the fries to your order. Would you like something to drink with that? Our house red pairs wonderfully with the Ribeye, if you're interested."
+STEP 4 (Anything Else): Call 'update_cart' for the drink if ordered, confirm it was added to their order, and ask if they'd like anything else. If it feels natural at this point (they seem to be wrapping up), you may mention ONE dessert option — but don't push it more than once.
+STEP 5 (Order Summary): Once they're done, summarize the FULL order so far (every item, with modifications) conversationally and ask them to confirm. Do NOT call 'submit_order' in this step, and do not imply it's been sent yet.
     -> "Just to confirm: one Ribeye, medium-rare, with the house red and the truffle fries. Shall I send that through?"
-STEP 6 (Submit): Only after explicit confirmation of the Step 5 summary (e.g. "yes", "correct", "looks good"), call 'submit_order', then confirm it's on its way to the kitchen.
+STEP 6 (Submit): Only after explicit confirmation of the Step 5 summary (e.g. "yes", "correct", "looks good"), call 'submit_order'. Your 'guest_reply' MUST restate the complete itemized order (every item and modification) AND explicitly state it has been sent to the kitchen — e.g. "Here's your order: one Ribeye (medium-rare), the truffle fries, and a glass of house red. This has been sent to the kitchen." Never call 'submit_order' speculatively or say it's been sent before actually calling the tool in this same turn.
 
 Every message before the order is sent must end with a genuine hospitality follow-up — never a bare "?" and never a "?" tacked onto a statement that isn't a question.
 
@@ -168,7 +181,7 @@ const GROQ_CHAT_TOOL_SUBMIT_ORDER = {
         guest_reply: {
           type: "string",
           description:
-            "Confirmation message to the guest that the order is being sent to the kitchen.",
+            "Must restate the complete itemized order (every item and modification) and explicitly confirm it has been sent to the kitchen — e.g. \"Here's your order: one Ribeye (medium-rare) and a glass of house red. This has been sent to the kitchen.\" Never vague — the guest must be able to tell from this message alone that the order was actually submitted.",
         },
       },
       required: ["guest_reply"],
@@ -1705,6 +1718,41 @@ function formatOrderStateForPrompt(items) {
 }
 
 /**
+ * Renders the guest's client-side, not-yet-submitted cart into the same
+ * kind of compact block used for the menu / already-ordered sections. The
+ * client already sends this on every /api/chat call (see chatApi.ts), but
+ * it was previously only read once `submit_order` fired — the model itself
+ * never saw it, and had to infer "what's already in the cart" purely from
+ * its own past prose. That's what caused it to re-call 'update_cart' on the
+ * main dish again instead of the side/drink the guest had just accepted:
+ * with no structured ground truth, a short "yes" is genuinely ambiguous.
+ * Grounding this every turn — exactly like the menu and the already-ordered
+ * section — removes that ambiguity.
+ */
+function formatCartForPrompt(cartLines, menuRows) {
+  const menuById = new Map((menuRows ?? []).map((m) => [m.id, m]));
+  const lines = (Array.isArray(cartLines) ? cartLines : [])
+    .map((l) => {
+      const qty = Number(l?.quantity ?? 0);
+      if (!Number.isFinite(qty) || qty <= 0) return null;
+      const menuItemId =
+        typeof l?.menu_item_id === "string" ? l.menu_item_id : "";
+      const name = menuById.get(menuItemId)?.name ?? null;
+      if (!name) return null;
+      const notes =
+        typeof l?.notes === "string" && l.notes.trim()
+          ? ` (${l.notes.trim()})`
+          : "";
+      return `${qty}x ${name}${notes}`;
+    })
+    .filter(Boolean);
+  if (lines.length === 0) {
+    return "Nothing has been added to the cart yet this session.";
+  }
+  return lines.join("\n");
+}
+
+/**
  * Used by the AI waiter's `request_item_cancellation` tool call — it only
  * knows a table id and a dish name, not an order/item id, so this resolves
  * the most recently-placed, still-active (non-canceled, not already
@@ -2058,6 +2106,13 @@ app.post("/api/chat", async (req, res) => {
     }
     const orderStateText = formatOrderStateForPrompt(currentOrderItems);
 
+    // Sent by the client on every turn (see chatApi.ts) — the guest's
+    // in-progress, not-yet-submitted cart. Read here (not just at
+    // submit_order time) so the model has real ground truth instead of
+    // having to infer cart contents from its own past sentences.
+    const clientCart = Array.isArray(req.body?.cart) ? req.body.cart : [];
+    const cartStateText = formatCartForPrompt(clientCart, menuRows);
+
     const compactMenu = formatMenuForPrompt(menuRows);
     const systemContent = `${SYSTEM_PROMPT}
 
@@ -2065,6 +2120,10 @@ The following table service items are currently available: ${runnerOptions}. If 
 
 --- Menu ---
 ${compactMenu}
+
+--- Your current cart (already added via update_cart this session — NOT yet sent to the kitchen) ---
+${cartStateText}
+This is the DEFINITIVE record of what's already in the cart. NEVER call 'update_cart' again for an item listed here — if the guest just accepted a suggestion (a side, a drink, a dessert), call 'update_cart' for THAT newly-accepted item, which will NOT be listed here yet, not for anything already shown above.
 
 --- Already ordered for this table (fetched fresh just now — this is the CURRENT, AUTHORITATIVE record; it is NOT the same thing as what you remember from earlier in this conversation, and it stays accurate even if this is a brand-new chat session) ---
 ${orderStateText}`;
@@ -2179,8 +2238,7 @@ ${orderStateText}`;
     let orderError = null;
     const hasSubmitOrder = tool_calls.some((t) => t.name === "submit_order");
     if (hasSubmitOrder) {
-      const cart = Array.isArray(req.body?.cart) ? req.body.cart : null;
-      if (!cart || cart.length === 0) {
+      if (clientCart.length === 0) {
         orderError = {
           status: 400,
           message: "submit_order was requested but no cart was provided",
@@ -2188,7 +2246,7 @@ ${orderStateText}`;
       } else {
         const result = await createOrderFromCart({
           table_id: tableKey,
-          items: cart,
+          items: clientCart,
         });
         if (result.error) {
           orderError = result.error;
