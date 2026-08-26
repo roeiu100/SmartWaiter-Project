@@ -1,6 +1,15 @@
 import { MENU_API_BASE } from "./menuApi";
 
-export type ActiveOrderItemStatus = "pending" | "ready" | "served";
+export type ActiveOrderItemStatus = "pending" | "ready" | "served" | "canceled";
+
+/** Cancellation sub-state — independent of `status`. See types/database.ts. */
+export type ActiveOrderItemCancellationStatus =
+  | "none"
+  | "requested"
+  | "approved"
+  | "rejected";
+
+export type ActiveOrderItemCanceledBy = "manager" | "ai_waiter";
 
 /** An order_item row returned by the server, with the joined menu name. */
 export interface ActiveOrderItem {
@@ -14,6 +23,10 @@ export interface ActiveOrderItem {
   served_at?: string | null;
   notes?: string | null;
   menu_item_name: string;
+  cancellation_status: ActiveOrderItemCancellationStatus;
+  cancellation_reason: string | null;
+  canceled_by: ActiveOrderItemCanceledBy | null;
+  canceled_at: string | null;
 }
 
 /** Full active order as returned by GET /api/orders/active. */
@@ -64,9 +77,22 @@ function normalizeItem(raw: unknown): ActiveOrderItem | null {
   const qty = Number(r.quantity ?? 1);
   const unit_price = Number(r.unit_price ?? 0);
   const status =
-    r.status === "ready" || r.status === "served" || r.status === "pending"
+    r.status === "ready" ||
+    r.status === "served" ||
+    r.status === "pending" ||
+    r.status === "canceled"
       ? (r.status as ActiveOrderItemStatus)
       : "pending";
+  const cancellation_status =
+    r.cancellation_status === "requested" ||
+    r.cancellation_status === "approved" ||
+    r.cancellation_status === "rejected"
+      ? (r.cancellation_status as ActiveOrderItemCancellationStatus)
+      : "none";
+  const canceled_by =
+    r.canceled_by === "manager" || r.canceled_by === "ai_waiter"
+      ? (r.canceled_by as ActiveOrderItemCanceledBy)
+      : null;
   const name = r.menu_item_name;
   return {
     id,
@@ -79,6 +105,11 @@ function normalizeItem(raw: unknown): ActiveOrderItem | null {
     served_at: toUtcIso(r.served_at),
     notes: typeof r.notes === "string" ? r.notes : null,
     menu_item_name: typeof name === "string" ? name : "",
+    cancellation_status,
+    cancellation_reason:
+      typeof r.cancellation_reason === "string" ? r.cancellation_reason : null,
+    canceled_by,
+    canceled_at: toUtcIso(r.canceled_at),
   };
 }
 
@@ -221,6 +252,73 @@ export async function patchItemStatus(
     const text = await res.text();
     throw new Error(
       `Update item status failed (${res.status}): ${text.slice(0, 200)}`
+    );
+  }
+}
+
+/**
+ * Non-2xx bodies from these two endpoints are always JSON (`{ error: string }`)
+ * on a real failure, but would be Express's default HTML 404 page if the
+ * route itself didn't exist / the URL was wrong. Try JSON first for a clean
+ * message; fall back to the raw (truncated) body so an unexpected HTML page
+ * is still visible rather than silently swallowed.
+ */
+function extractApiErrorMessage(status: number, text: string): string {
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown };
+    if (typeof parsed.error === "string" && parsed.error.trim()) {
+      return parsed.error;
+    }
+  } catch {
+    // Not JSON — likely a framework-level error page (e.g. wrong route/method).
+  }
+  return `HTTP ${status}: ${text.slice(0, 200)}`;
+}
+
+/** Manager cancels a dish directly — takes effect immediately. */
+export async function cancelOrderItem(
+  orderId: string,
+  itemId: string,
+  reason: string
+): Promise<void> {
+  const url = `${MENU_API_BASE}/api/orders/${encodeURIComponent(
+    orderId
+  )}/items/${encodeURIComponent(itemId)}/cancel`;
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ reason }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Cancel item failed — ${extractApiErrorMessage(res.status, text)}`);
+  }
+}
+
+/** Manager approves or rejects a cancellation the AI waiter requested. */
+export async function resolveCancellationRequest(
+  orderId: string,
+  itemId: string,
+  decision: "approve" | "reject"
+): Promise<void> {
+  const url = `${MENU_API_BASE}/api/orders/${encodeURIComponent(
+    orderId
+  )}/items/${encodeURIComponent(itemId)}/resolve-cancellation`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ decision }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(
+      `Resolve cancellation failed — ${extractApiErrorMessage(res.status, text)}`
     );
   }
 }

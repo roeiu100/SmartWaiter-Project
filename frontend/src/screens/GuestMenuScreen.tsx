@@ -30,29 +30,34 @@ type Props = NativeStackScreenProps<CustomerStackParamList, "Guest">;
  */
 function categoryRank(name: string): number {
   const n = name.toLowerCase().trim();
-  if (n === "food") return 0;
-  if (n === "desserts" || n === "dessert" || n === "deserts" || n === "desert") return 1;
-  if (n === "drinks" || n === "drink") return 2;
-  return 3;
-}
-
-/**
- * Within the Food category, items with a `subcategory` (starters/mains)
- * get their own subheading, in this order; untagged items sort last.
- */
-function subcategoryRank(name: string): number {
-  const n = name.toLowerCase().trim();
-  if (n === "starters" || n === "starter" || n === "appetizers") return 0;
-  if (n === "main courses" || n === "main course" || n === "mains" || n === "main")
-    return 1;
-  if (!n) return 99;
-  return 50;
+  if (n === "starters") return 0;
+  if (n === "main") return 1;
+  if (n === "desserts" || n === "dessert" || n === "deserts" || n === "desert") return 2;
+  if (n === "drinks" || n === "drink") return 3;
+  return 4;
 }
 
 function titleCase(name: string): string {
   const s = name.trim();
   if (!s) return s;
   return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
+/**
+ * The "Food" category has been fully replaced by its subcategories
+ * (Starters/Main) as top-level categories — there is no "Food" heading
+ * anymore. Items still tagged category=food in the data are re-keyed here
+ * by their subcategory so they show up as plain top-level categories,
+ * siblings of Desserts/Drinks, without touching the underlying data.
+ */
+function effectiveCategoryKey(item: MenuItemRow): string {
+  const rawCategory = item.category.trim().toLowerCase();
+  if (rawCategory !== "food" && rawCategory !== "foods") return rawCategory;
+  const sub = (item.subcategory ?? "").trim().toLowerCase();
+  if (sub === "starters" || sub === "starter" || sub === "appetizers") return "starters";
+  if (sub === "main courses" || sub === "main course" || sub === "mains" || sub === "main")
+    return "main";
+  return sub || "main";
 }
 
 interface CategoryEntry {
@@ -227,14 +232,15 @@ export function GuestMenuScreen({ route }: Props) {
     }
   }, [lines, menuItems, guestTableId, clearGuestCart]);
 
-  /** All available categories, sorted (food, desserts, drinks, …others). */
+  /** All available categories, sorted (starters, main, desserts, drinks, …others). */
   const categories: CategoryEntry[] = useMemo(() => {
     const byCat = new Map<string, MenuItemRow[]>();
     for (const m of menuItems) {
       if (!m.is_available) continue;
-      const arr = byCat.get(m.category) ?? [];
+      const key = effectiveCategoryKey(m);
+      const arr = byCat.get(key) ?? [];
       arr.push(m);
-      byCat.set(m.category, arr);
+      byCat.set(key, arr);
     }
     const entries: CategoryEntry[] = [];
     for (const [key, items] of byCat.entries()) {
@@ -268,22 +274,23 @@ export function GuestMenuScreen({ route }: Props) {
 
   interface ItemSection {
     key: string;
-    /** Empty string = no visible subheading (Desserts/Drinks, or untagged Food items). */
+    /** Empty string = no visible subheading. */
     title: string;
     data: MenuItemRow[];
   }
 
   /**
-   * Groups the selected category's items by `subcategory` (e.g. Food ->
-   * Starters / Main Courses). Categories with no subcategory data at all
-   * (Desserts, Drinks, or Food before it's tagged) collapse to a single
-   * section with an empty title, which renders with no visible subheading
-   * — i.e. pixel-identical to the old flat list.
+   * Groups the selected category's items by `subcategory`. Categories with
+   * no subcategory data collapse to a single section with an empty title,
+   * which renders with no visible subheading. Also collapses a section
+   * whose title would just repeat the page's own category header (e.g. the
+   * "Starters" page, whose items are still tagged subcategory=starters) so
+   * we don't show a redundant subheading under the top-level heading.
    */
   const itemSectionsInCategory: ItemSection[] = useMemo(() => {
     if (!selectedCategory) return [];
     const items = menuItems.filter(
-      (m) => m.is_available && m.category === selectedCategory
+      (m) => m.is_available && effectiveCategoryKey(m) === selectedCategory
     );
     const bySub = new Map<string, MenuItemRow[]>();
     for (const it of items) {
@@ -292,17 +299,22 @@ export function GuestMenuScreen({ route }: Props) {
       arr.push(it);
       bySub.set(sub, arr);
     }
+    const pageLabel = titleCase(selectedCategory).toLowerCase();
     const keys = Array.from(bySub.keys()).sort((a, b) => {
-      const ra = subcategoryRank(a);
-      const rb = subcategoryRank(b);
+      const ra = a === selectedCategory ? -1 : 0;
+      const rb = b === selectedCategory ? -1 : 0;
       if (ra !== rb) return ra - rb;
       return a.localeCompare(b);
     });
-    return keys.map((key) => ({
-      key: key || "__untagged__",
-      title: key ? titleCase(key) : "",
-      data: bySub.get(key)!,
-    }));
+    return keys.map((key) => {
+      const label = key ? titleCase(key) : "";
+      const title = label.toLowerCase() === pageLabel ? "" : label;
+      return {
+        key: key || "__untagged__",
+        title,
+        data: bySub.get(key)!,
+      };
+    });
   }, [menuItems, selectedCategory]);
 
   const renderCategoryCard = useCallback(

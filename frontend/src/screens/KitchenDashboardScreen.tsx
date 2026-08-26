@@ -141,17 +141,23 @@ function OrderTicket({
   const isStale = ageMs >= STALE_AFTER_MS;
   const elapsedColor = getElapsedTimeColor(ageMs);
 
-  const pendingCount = order.items.filter((it) => it.status === "pending")
+  // Canceled dishes never show on the ticket — kitchen shouldn't waste time
+  // on something that's been called off. Items still awaiting a manager's
+  // cancellation decision ("requested") are NOT filtered out here — that
+  // request hasn't been approved yet, so the kitchen keeps preparing them.
+  const liveItems = order.items.filter((it) => it.status !== "canceled");
+
+  const pendingCount = liveItems.filter((it) => it.status === "pending")
     .length;
   const canMarkAll = pendingCount > 0;
 
-  const totalItems = order.items.length;
+  const totalItems = liveItems.length;
   const hasHidden = totalItems > COLLAPSED_ITEM_COUNT;
   const hiddenCount = totalItems - COLLAPSED_ITEM_COUNT;
   const visibleItems =
     isExpanded || !hasHidden
-      ? order.items
-      : order.items.slice(0, COLLAPSED_ITEM_COUNT);
+      ? liveItems
+      : liveItems.slice(0, COLLAPSED_ITEM_COUNT);
 
   const onPressCard = () => {
     if (isExpanded) {
@@ -360,7 +366,8 @@ function OrderDetailModal({
     setCheckedItems(new Set());
   }, [order.id]);
 
-  const pendingCount = order.items.filter((it) => it.status === "pending")
+  const liveItems = order.items.filter((it) => it.status !== "canceled");
+  const pendingCount = liveItems.filter((it) => it.status === "pending")
     .length;
   const canMarkAll = pendingCount > 0;
   const ageMs = getOrderElapsedMs(order.created_at, currentTime);
@@ -433,7 +440,7 @@ function OrderDetailModal({
           >
             <Text style={styles.modalSectionTitle}>All items</Text>
 
-            {order.items.map((line) => {
+            {liveItems.map((line) => {
               const notes = (line.notes ?? "").trim();
               const isReady = line.status === "ready";
               const isServed = line.status === "served";

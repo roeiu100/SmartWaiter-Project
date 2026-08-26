@@ -10,16 +10,22 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { MENU_API_BASE } from "../services/menuApi";
 import {
+  cancelOrderItem,
   fetchUnpaidOrders,
+  resolveCancellationRequest,
   type ActiveOrder,
+  type ActiveOrderItem,
   type ActiveOrderItemStatus,
 } from "../services/orderApi";
 import { TABLE_LAYOUT, type TableLayoutEntry, type TableShape } from "../data/tableLayout";
+import { useAuthStore } from "../store/authStore";
+import { usePendingCancellationsStore } from "../store/pendingCancellationsStore";
 import { premium } from "../theme/premium";
 
 const CHAIR_SIZE = 10;
@@ -270,7 +276,7 @@ function formatPlacedAt(iso: string): string {
  * order's `paid_at` is set (whole-table payment). See the explanation this
  * was delivered with for why that's the right split.
  */
-type DishStatus = "preparing" | "ready" | "served" | "paid";
+type DishStatus = "preparing" | "ready" | "served" | "paid" | "canceled";
 
 const DISH_STATUS_META: Record<
   DishStatus,
@@ -280,12 +286,14 @@ const DISH_STATUS_META: Record<
   ready: { label: "Ready", color: premium.goldDark, bg: premium.goldMuted },
   served: { label: "Served", color: premium.runner, bg: premium.runnerSoft },
   paid: { label: "Paid", color: "#4338CA", bg: "rgba(99,102,241,0.14)" },
+  canceled: { label: "Canceled", color: "#6B7280", bg: "rgba(107,114,128,0.14)" },
 };
 
 function getDishStatus(
   itemStatus: ActiveOrderItemStatus,
   isPaid: boolean
 ): DishStatus {
+  if (itemStatus === "canceled") return "canceled";
   if (isPaid) return "paid";
   if (itemStatus === "served") return "served";
   if (itemStatus === "ready") return "ready";
@@ -310,6 +318,21 @@ function DishBadge({ status }: { status: DishStatus }) {
  */
 export function TableMapScreen() {
   const insets = useSafeAreaInsets();
+  // Cancel/approve controls are manager-only — Runner reaches this same
+  // screen from RunnerStackNavigator and must not see them.
+  const isManager = useAuthStore((s) => s.role) === "manager";
+  const pendingCancellations = usePendingCancellationsStore((s) => s.items);
+  const removePendingCancellation = usePendingCancellationsStore(
+    (s) => s.removeItem
+  );
+  const [resolvingItemId, setResolvingItemId] = useState<string | null>(null);
+  const [cancelTarget, setCancelTarget] = useState<{
+    orderId: string;
+    itemId: string;
+    itemName: string;
+  } | null>(null);
+  const [cancelReasonText, setCancelReasonText] = useState("");
+  const [cancelSubmitting, setCancelSubmitting] = useState(false);
   const [orders, setOrders] = useState<ActiveOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -387,11 +410,15 @@ export function TableMapScreen() {
     socket.on("order_created", onChanged);
     socket.on("order_status_changed", onChanged);
     socket.on("order_item_status_changed", onChanged);
+    socket.on("order_item_cancellation_requested", onChanged);
+    socket.on("order_item_cancellation_resolved", onChanged);
     socket.on("table_paid", onTablePaid);
     return () => {
       socket.off("order_created", onChanged);
       socket.off("order_status_changed", onChanged);
       socket.off("order_item_status_changed", onChanged);
+      socket.off("order_item_cancellation_requested", onChanged);
+      socket.off("order_item_cancellation_resolved", onChanged);
       socket.off("table_paid", onTablePaid);
       socket.disconnect();
     };
@@ -429,12 +456,132 @@ export function TableMapScreen() {
     Alert.alert("Print Bill", "Printing is not yet implemented.");
   }, [selectedTableId, selectedOrders]);
 
+  const openCancelPrompt = useCallback((orderId: string, item: ActiveOrderItem) => {
+    setCancelTarget({ orderId, itemId: item.id, itemName: item.menu_item_name });
+    setCancelReasonText("");
+  }, []);
+
+  const closeCancelPrompt = useCallback(() => {
+    if (cancelSubmitting) return;
+    setCancelTarget(null);
+    setCancelReasonText("");
+  }, [cancelSubmitting]);
+
+  const confirmCancelItem = useCallback(async () => {
+    if (!cancelTarget) return;
+    const reason = cancelReasonText.trim();
+    if (!reason) {
+      Alert.alert("Reason required", "Please enter a reason for the cancellation.");
+      return;
+    }
+    setCancelSubmitting(true);
+    try {
+      await cancelOrderItem(cancelTarget.orderId, cancelTarget.itemId, reason);
+      setCancelTarget(null);
+      setCancelReasonText("");
+      void loadOrders({ silent: true });
+    } catch (err) {
+      console.error("[TableMap] cancelOrderItem failed:", err);
+      Alert.alert(
+        "Could not cancel item",
+        err instanceof Error ? err.message : "Please try again."
+      );
+    } finally {
+      setCancelSubmitting(false);
+    }
+  }, [cancelTarget, cancelReasonText, loadOrders]);
+
+  const resolveRequest = useCallback(
+    async (orderId: string, itemId: string, decision: "approve" | "reject") => {
+      setResolvingItemId(itemId);
+      try {
+        await resolveCancellationRequest(orderId, itemId, decision);
+        removePendingCancellation(itemId);
+        void loadOrders({ silent: true });
+      } catch (err) {
+        console.error(
+          `[TableMap] resolveCancellationRequest (${decision}) failed:`,
+          err
+        );
+        Alert.alert(
+          decision === "approve" ? "Could not approve" : "Could not reject",
+          err instanceof Error ? err.message : "Please try again."
+        );
+      } finally {
+        setResolvingItemId(null);
+      }
+    },
+    [loadOrders, removePendingCancellation]
+  );
+
+  // The reason prompt is rendered as an overlay INSIDE the table-detail
+  // Modal below (not as its own separate <Modal>). Two RN <Modal>s mounted
+  // at once is an unsupported pattern — each Modal opens its own native
+  // window, and stacking a second one on top of the first breaks the touch
+  // responder chain (especially on Android): taps inside the top modal can
+  // get lost, and once it closes the screen behind it stops receiving
+  // touches at all. A single Modal with an internal overlay avoids that
+  // entirely while looking identical.
+  const onRequestCloseTableModal = useCallback(() => {
+    if (cancelTarget) {
+      closeCancelPrompt();
+      return;
+    }
+    closeModal();
+  }, [cancelTarget, closeCancelPrompt, closeModal]);
+
   return (
     <View style={[styles.root, { paddingTop: Math.max(insets.top, 12) }]}>
       <View style={styles.hero}>
         <Text style={styles.kicker}>FLOOR</Text>
         <Text style={styles.heroTitle}>Table Map</Text>
       </View>
+
+      {isManager && pendingCancellations.length > 0 ? (
+        <View style={styles.pendingSection}>
+          <Text style={styles.pendingSectionTitle}>
+            Pending Cancellation Requests ({pendingCancellations.length})
+          </Text>
+          {pendingCancellations.map((req) => (
+            <View key={req.item_id} style={styles.pendingCard}>
+              <View style={styles.pendingCardText}>
+                <Text style={styles.pendingCardTitle}>
+                  Table {req.table_id} · {req.quantity} × {req.menu_item_name}
+                </Text>
+                {req.reason ? (
+                  <Text style={styles.pendingCardReason}>"{req.reason}"</Text>
+                ) : null}
+              </View>
+              <View style={styles.pendingCardActions}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Reject cancellation of ${req.menu_item_name}`}
+                  disabled={resolvingItemId === req.item_id}
+                  onPress={() => void resolveRequest(req.order_id, req.item_id, "reject")}
+                  style={({ pressed }) => [
+                    styles.pendingRejectBtn,
+                    pressed && styles.pendingBtnPressed,
+                  ]}
+                >
+                  <Text style={styles.pendingRejectBtnText}>Reject</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Approve cancellation of ${req.menu_item_name}`}
+                  disabled={resolvingItemId === req.item_id}
+                  onPress={() => void resolveRequest(req.order_id, req.item_id, "approve")}
+                  style={({ pressed }) => [
+                    styles.pendingApproveBtn,
+                    pressed && styles.pendingBtnPressed,
+                  ]}
+                >
+                  <Text style={styles.pendingApproveBtnText}>Approve</Text>
+                </Pressable>
+              </View>
+            </View>
+          ))}
+        </View>
+      ) : null}
 
       {loading ? (
         <View style={styles.loadingBanner}>
@@ -479,7 +626,7 @@ export function TableMapScreen() {
         visible={selectedTableId != null}
         transparent
         animationType="fade"
-        onRequestClose={closeModal}
+        onRequestClose={onRequestCloseTableModal}
       >
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
@@ -518,21 +665,65 @@ export function TableMapScreen() {
                       </Text>
                       <Text style={styles.modalStatus}>{item.status}</Text>
                     </View>
-                    {item.items.map((line) => (
-                      <View key={line.id} style={styles.modalItemRow}>
-                        <View style={styles.modalItemTextCol}>
-                          <Text style={styles.modalItemLine} numberOfLines={2}>
-                            {line.quantity} × {line.menu_item_name}
-                          </Text>
-                          <DishBadge
-                            status={getDishStatus(line.status, isJustPaidView)}
-                          />
+                    {item.items.map((line) => {
+                      const isCanceled = line.status === "canceled";
+                      const isPendingCancellation =
+                        line.cancellation_status === "requested";
+                      return (
+                        <View key={line.id} style={styles.modalItemRow}>
+                          <View style={styles.modalItemTextCol}>
+                            <Text
+                              style={[
+                                styles.modalItemLine,
+                                isCanceled && styles.modalItemLineCanceled,
+                              ]}
+                              numberOfLines={2}
+                            >
+                              {line.quantity} × {line.menu_item_name}
+                            </Text>
+                            <DishBadge
+                              status={getDishStatus(line.status, isJustPaidView)}
+                            />
+                            {isCanceled && line.cancellation_reason ? (
+                              <Text style={styles.modalCancelReason}>
+                                Reason: {line.cancellation_reason}
+                                {line.canceled_by === "ai_waiter"
+                                  ? " (requested via AI waiter)"
+                                  : ""}
+                              </Text>
+                            ) : null}
+                            {isPendingCancellation ? (
+                              <Text style={styles.modalCancelPending}>
+                                Cancellation requested — awaiting your review above
+                              </Text>
+                            ) : null}
+                          </View>
+                          <View style={styles.modalItemRightCol}>
+                            <Text
+                              style={[
+                                styles.modalItemPrice,
+                                isCanceled && styles.modalItemLineCanceled,
+                              ]}
+                            >
+                              ${(line.unit_price * line.quantity).toFixed(2)}
+                            </Text>
+                            {isManager && !isCanceled && !isJustPaidView ? (
+                              <Pressable
+                                accessibilityRole="button"
+                                accessibilityLabel={`Cancel ${line.menu_item_name}`}
+                                onPress={() => openCancelPrompt(item.id, line)}
+                                style={({ pressed }) => [
+                                  styles.cancelItemBtn,
+                                  pressed && styles.cancelItemBtnPressed,
+                                ]}
+                              >
+                                <Text style={styles.cancelItemBtnText}>Cancel</Text>
+                              </Pressable>
+                            ) : null}
+                          </View>
                         </View>
-                        <Text style={styles.modalItemPrice}>
-                          ${(line.unit_price * line.quantity).toFixed(2)}
-                        </Text>
-                      </View>
-                    ))}
+                      );
+                    })}
                   </View>
                 )}
               />
@@ -556,6 +747,59 @@ export function TableMapScreen() {
               </Pressable>
             </View>
           </View>
+
+          {/* Reason prompt as an overlay INSIDE this same Modal — see
+              onRequestCloseTableModal comment above for why this must not
+              be a second <Modal>. */}
+          {cancelTarget != null ? (
+            <View style={styles.reasonOverlayBackdrop}>
+              <View style={styles.reasonModalCard}>
+                <Text style={styles.reasonModalTitle}>
+                  Cancel {cancelTarget.itemName}
+                </Text>
+                <Text style={styles.reasonModalSubtitle}>
+                  This takes effect immediately. Please enter a reason.
+                </Text>
+                <TextInput
+                  value={cancelReasonText}
+                  onChangeText={setCancelReasonText}
+                  placeholder="e.g. Guest changed their mind"
+                  placeholderTextColor={premium.mutedLight}
+                  style={styles.reasonModalInput}
+                  multiline
+                  editable={!cancelSubmitting}
+                />
+                <View style={styles.reasonModalActions}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Dismiss without canceling"
+                    disabled={cancelSubmitting}
+                    onPress={closeCancelPrompt}
+                    style={({ pressed }) => [
+                      styles.reasonModalCancelBtn,
+                      pressed && styles.pendingBtnPressed,
+                    ]}
+                  >
+                    <Text style={styles.reasonModalCancelBtnText}>Dismiss</Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Confirm item cancellation"
+                    disabled={cancelSubmitting}
+                    onPress={() => void confirmCancelItem()}
+                    style={({ pressed }) => [
+                      styles.reasonModalConfirmBtn,
+                      pressed && styles.pendingBtnPressed,
+                    ]}
+                  >
+                    <Text style={styles.reasonModalConfirmBtnText}>
+                      {cancelSubmitting ? "Canceling…" : "Cancel Item"}
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+          ) : null}
         </View>
       </Modal>
     </View>
@@ -717,8 +961,38 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   modalItemTextCol: { flex: 1, gap: 5 },
+  modalItemRightCol: { alignItems: "flex-end", gap: 6 },
   modalItemLine: { fontSize: 14, color: premium.charcoalSoft },
+  modalItemLineCanceled: {
+    textDecorationLine: "line-through",
+    color: premium.muted,
+  },
   modalItemPrice: { fontSize: 14, fontWeight: "700", color: premium.charcoal },
+  modalCancelReason: {
+    fontSize: 12,
+    fontStyle: "italic",
+    color: premium.muted,
+  },
+  modalCancelPending: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#B45309",
+  },
+  cancelItemBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    backgroundColor: "rgba(220,38,38,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(220,38,38,0.35)",
+  },
+  cancelItemBtnPressed: { opacity: 0.8 },
+  cancelItemBtnText: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#DC2626",
+    textTransform: "uppercase",
+  },
   dishBadge: {
     alignSelf: "flex-start",
     paddingHorizontal: 9,
@@ -763,4 +1037,115 @@ const styles = StyleSheet.create({
   },
   printBtnPressed: { opacity: 0.85 },
   printBtnText: { color: premium.navAccent, fontWeight: "700", fontSize: 14 },
+
+  pendingSection: {
+    marginHorizontal: 20,
+    marginBottom: 16,
+    padding: 14,
+    borderRadius: 16,
+    backgroundColor: "#FEF3C7",
+    borderWidth: 1,
+    borderColor: "#FDE68A",
+    gap: 10,
+  },
+  pendingSectionTitle: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#92400E",
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+  },
+  pendingCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    backgroundColor: "#FFFBEB",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#FDE68A",
+    padding: 12,
+  },
+  pendingCardText: { flex: 1, gap: 4 },
+  pendingCardTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: premium.charcoal,
+  },
+  pendingCardReason: {
+    fontSize: 12,
+    fontStyle: "italic",
+    color: premium.muted,
+  },
+  pendingCardActions: { flexDirection: "row", gap: 8 },
+  pendingBtnPressed: { opacity: 0.85 },
+  pendingRejectBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: "rgba(107,114,128,0.14)",
+    borderWidth: 1,
+    borderColor: "rgba(107,114,128,0.35)",
+  },
+  pendingRejectBtnText: { fontSize: 12, fontWeight: "800", color: "#4B5563" },
+  pendingApproveBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: premium.goldDark,
+  },
+  pendingApproveBtnText: { fontSize: 12, fontWeight: "800", color: "#fff" },
+
+  // Overlay for the cancel-reason prompt, rendered INSIDE the table-detail
+  // Modal (not as a second <Modal>) — see onRequestCloseTableModal comment
+  // in the component for why. absoluteFillObject over `modalBackdrop`
+  // (a View, so position:relative by default) covers the table card below.
+  reasonOverlayBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    justifyContent: "center",
+    padding: 20,
+  },
+  reasonModalCard: {
+    backgroundColor: premium.ivory,
+    borderRadius: 20,
+    padding: 20,
+    gap: 14,
+  },
+  reasonModalTitle: {
+    fontSize: 18,
+    fontWeight: "800",
+    color: premium.charcoal,
+  },
+  reasonModalSubtitle: { fontSize: 13, color: premium.muted },
+  reasonModalInput: {
+    minHeight: 70,
+    borderWidth: 1,
+    borderColor: premium.border,
+    borderRadius: 12,
+    padding: 12,
+    fontSize: 14,
+    color: premium.charcoal,
+    textAlignVertical: "top",
+    backgroundColor: premium.ivoryDark,
+  },
+  reasonModalActions: { flexDirection: "row", gap: 10 },
+  reasonModalCancelBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: "center",
+    backgroundColor: premium.ivoryDark,
+    borderWidth: 1,
+    borderColor: premium.border,
+  },
+  reasonModalCancelBtnText: { fontWeight: "700", color: premium.charcoalSoft },
+  reasonModalConfirmBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: "center",
+    backgroundColor: "#DC2626",
+  },
+  reasonModalConfirmBtnText: { fontWeight: "800", color: "#fff" },
 });

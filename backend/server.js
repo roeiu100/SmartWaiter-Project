@@ -60,7 +60,7 @@ TOOL SURVIVAL RULE (CRITICAL FOR PREVENTING CRASHES):
 CRITICAL TOOL RULE: 'update_cart' arguments MUST be a single flat JSON object (e.g. \`{"item_name": "Ribeye Steak", "quantity": 1}\`) — never wrapped in an array.
 
 NATIVE TOOL CALLING (CRITICAL — prevents API failures):
-Never use XML/HTML tags, markdown fences, or text like <function=update_cart> to call a tool. You MUST use the platform's native Tool Calling API for update_cart, submit_order, request_runner, and request_check. Put your spoken reply in the tool's 'guest_reply' argument — never write a tool call as plain message text.
+Never use XML/HTML tags, markdown fences, or text like <function=update_cart> to call a tool. You MUST use the platform's native Tool Calling API for update_cart, submit_order, request_runner, request_check, and request_item_cancellation. Put your spoken reply in the tool's 'guest_reply' argument — never write a tool call as plain message text.
 
 MEMORY RULE (CRITICAL):
 Once you call 'update_cart' for an item, it's saved. Never re-add it in a later turn — e.g. if they say "yes" to fries, call 'update_cart' for the fries only, not the main again.
@@ -102,12 +102,15 @@ Non-menu items — napkins, water, ice, condiments, cutlery, extra plate/chair/g
 CHECK / BILL REQUESTS (CRITICAL — separate flow from food ordering and runner requests):
 If the guest asks for the check, the bill, to pay, or to close out (any language, e.g. "can I get the check", "החשבון בבקשה"), do not call 'update_cart' or 'submit_order'. Immediately call 'request_check' ONCE; 'guest_reply' briefly confirms you're bringing up their bill. No follow-up question after.
 
+ITEM CANCELLATION REQUESTS (CRITICAL — separate flow from food ordering):
+If the guest asks to cancel, remove, or take back a dish that was ALREADY sent to the kitchen (i.e. ordered in an earlier turn via 'submit_order' — NOT an item still being discussed before submission, which is a plain 'update_cart' with quantity 0), do not call 'update_cart'. Immediately call 'request_item_cancellation' ONCE with the item's name and a short reason drawn from what the guest said. This does NOT cancel the dish immediately — it only files a request for the manager to approve. Your 'guest_reply' must say you've flagged it for the manager to confirm — never promise it's already canceled or that it won't be charged.
+
 LANGUAGE: Reply only in the language the guest used most recently.
 </operational_instructions>`;
 
 /** Appended as the final system message before each Groq completion (persona anchor). */
 const PERSONA_ANCHOR_SYSTEM_MESSAGE =
-  "CRITICAL INSTRUCTION: Respond to the user's latest message strictly using your warm, table-side-brief waiter persona. Follow all operational instructions. If you need update_cart, submit_order, request_runner, or request_check, invoke them ONLY via native tool/function calling — never as <function=...> text.";
+  "CRITICAL INSTRUCTION: Respond to the user's latest message strictly using your warm, table-side-brief waiter persona. Follow all operational instructions. If you need update_cart, submit_order, request_runner, request_check, or request_item_cancellation, invoke them ONLY via native tool/function calling — never as <function=...> text.";
 
 const RUNNER_OPTIONS_FALLBACK = "Napkins, Water, Ketchup";
 
@@ -190,6 +193,36 @@ const GROQ_CHAT_TOOL_REQUEST_CHECK = {
   },
 };
 
+const GROQ_CHAT_TOOL_REQUEST_ITEM_CANCELLATION = {
+  type: "function",
+  function: {
+    name: "request_item_cancellation",
+    description:
+      "File a request to cancel a dish already sent to the kitchen (already ordered via submit_order in an earlier turn). Does NOT cancel it immediately — a manager must approve. Invoke ONLY via native tool calling.",
+    parameters: {
+      type: "object",
+      properties: {
+        item_name: {
+          type: "string",
+          description:
+            "The already-ordered item's exact name as shown in the menu (e.g. \"Ribeye Steak\"). Must match a real menu item.",
+        },
+        reason: {
+          type: "string",
+          description:
+            "Why the guest wants it canceled, in your own words based on what they said (e.g. \"Guest says it's taking too long\").",
+        },
+        guest_reply: {
+          type: "string",
+          description:
+            "Your warm, table-side-brief reply explaining you've flagged this for the manager to confirm — never say it's already canceled.",
+        },
+      },
+      required: ["item_name", "reason", "guest_reply"],
+    },
+  },
+};
+
 /**
  * Build the full `tools` array for a chat turn. `request_runner` description
  * is dynamic — lists table-service items from Supabase `runner_options`.
@@ -229,6 +262,7 @@ function buildGroqChatTools(runnerOptionsString) {
     GROQ_CHAT_TOOL_SUBMIT_ORDER,
     GROQ_CHAT_TOOL_REQUEST_RUNNER,
     GROQ_CHAT_TOOL_REQUEST_CHECK,
+    GROQ_CHAT_TOOL_REQUEST_ITEM_CANCELLATION,
   ];
 }
 
@@ -280,7 +314,7 @@ async function createGroqChatCompletionWithTools({
       {
         role: "system",
         content:
-          "REMINDER: You MUST invoke update_cart, submit_order, request_runner, and request_check using native Tool Calling only. NEVER output <function=name> or <function=name(...)</function> tags or any XML/HTML tool syntax.",
+          "REMINDER: You MUST invoke update_cart, submit_order, request_runner, request_check, and request_item_cancellation using native Tool Calling only. NEVER output <function=name> or <function=name(...)</function> tags or any XML/HTML tool syntax.",
       },
     ];
     return await groq.chat.completions.create({
@@ -924,19 +958,70 @@ app.patch("/api/runner-options/:id/availability", async (req, res) => {
 // Kitchen / runner dashboards            -> GET /api/orders/active
 //
 // Socket.io events broadcast to every client so dashboards stay in sync:
-//   - order_created              { order }
-//   - order_item_status_changed  { order_id, item_id, status, ready_at?, served_at? }
-//   - order_status_changed       { order_id, status, ready_at?, served_at? }
+//   - order_created                        { order }
+//   - order_item_status_changed             { order_id, item_id, status, ready_at?, served_at?, cancellation_reason?, canceled_by?, canceled_at?, total_price? }
+//   - order_status_changed                  { order_id, status, ready_at?, served_at? }
+//   - order_item_cancellation_requested     { order_id, item_id, table_id, menu_item_id, menu_item_name, quantity, reason, requested_at }
+//   - order_item_cancellation_resolved      { order_id, item_id, table_id, decision }
 // ============================================================================
 
 const ITEM_STATUSES = new Set(["pending", "ready", "served"]);
+const ITEM_ORDER_ITEMS_SELECT = `
+  id, order_id, menu_item_id, quantity, unit_price, status,
+  ready_at, served_at, notes,
+  cancellation_status, cancellation_reason, canceled_by, canceled_at,
+  menu_items:menu_items ( id, name )
+`;
+
+function mapOrderItemRow(it) {
+  return {
+    id: it.id,
+    order_id: it.order_id,
+    menu_item_id: it.menu_item_id,
+    quantity: it.quantity,
+    unit_price: Number(it.unit_price ?? 0),
+    status: it.status,
+    ready_at: it.ready_at,
+    served_at: it.served_at,
+    notes: it.notes,
+    cancellation_status: it.cancellation_status ?? "none",
+    cancellation_reason: it.cancellation_reason ?? null,
+    canceled_by: it.canceled_by ?? null,
+    canceled_at: it.canceled_at ?? null,
+    menu_item_name: it.menu_items?.name ?? "",
+  };
+}
 
 function normalizeOrderStatusFromItems(items, previous) {
-  if (!Array.isArray(items) || items.length === 0) return previous;
-  if (items.every((it) => it.status === "served")) return "delivered";
-  if (items.some((it) => it.status === "ready")) return "ready";
-  if (items.some((it) => it.status === "pending")) return "preparing";
+  // Canceled lines don't participate in the parent order's kitchen/runner
+  // lifecycle at all — a fully-canceled order keeps whatever status it had.
+  const live = (Array.isArray(items) ? items : []).filter(
+    (it) => it.status !== "canceled"
+  );
+  if (live.length === 0) return previous;
+  if (live.every((it) => it.status === "served")) return "delivered";
+  if (live.some((it) => it.status === "ready")) return "ready";
+  if (live.some((it) => it.status === "pending")) return "preparing";
   return previous;
+}
+
+/** Recomputes `orders.total_price` from every non-canceled line and persists it. */
+async function recomputeOrderTotal(orderId) {
+  const { data: items, error } = await supabase
+    .from("order_items")
+    .select("unit_price, quantity, status")
+    .eq("order_id", orderId);
+  if (error) return { error };
+  const total = (items ?? [])
+    .filter((it) => it.status !== "canceled")
+    .reduce((sum, it) => sum + Number(it.unit_price ?? 0) * Number(it.quantity ?? 0), 0);
+  const rounded = Math.round(total * 100) / 100;
+  const { error: upErr } = await supabase
+    .from("orders")
+    .update({ total_price: rounded })
+    .eq("id", orderId);
+  if (upErr) return { error: upErr };
+  return { total: rounded };
 }
 
 /**
@@ -950,27 +1035,12 @@ async function loadFullOrder(orderId) {
     .select(
       `id, table_id, status, total_price, created_at, submitted_at,
        ready_at, served_at, guest_note,
-       order_items:order_items (
-         id, order_id, menu_item_id, quantity, unit_price, status,
-         ready_at, served_at, notes,
-         menu_items:menu_items ( id, name )
-       )`
+       order_items:order_items ( ${ITEM_ORDER_ITEMS_SELECT} )`
     )
     .eq("id", orderId)
     .single();
   if (error) return { error };
-  const items = (data?.order_items ?? []).map((it) => ({
-    id: it.id,
-    order_id: it.order_id,
-    menu_item_id: it.menu_item_id,
-    quantity: it.quantity,
-    unit_price: Number(it.unit_price ?? 0),
-    status: it.status,
-    ready_at: it.ready_at,
-    served_at: it.served_at,
-    notes: it.notes,
-    menu_item_name: it.menu_items?.name ?? "",
-  }));
+  const items = (data?.order_items ?? []).map(mapOrderItemRow);
   const { order_items: _omit, ...orderRow } = data;
   return {
     data: {
@@ -1118,11 +1188,7 @@ app.get("/api/orders/active", async (req, res) => {
       .select(
         `id, table_id, status, total_price, created_at, submitted_at,
          ready_at, served_at, guest_note,
-         order_items:order_items (
-           id, order_id, menu_item_id, quantity, unit_price, status,
-           ready_at, served_at, notes,
-           menu_items:menu_items ( id, name )
-         )`
+         order_items:order_items ( ${ITEM_ORDER_ITEMS_SELECT} )`
       )
       .neq("status", "delivered")
       .order("created_at", { ascending: true });
@@ -1131,18 +1197,7 @@ app.get("/api/orders/active", async (req, res) => {
       return res.status(500).json({ error: error.message });
     }
     const rows = (data ?? []).map((row) => {
-      const items = (row.order_items ?? []).map((it) => ({
-        id: it.id,
-        order_id: it.order_id,
-        menu_item_id: it.menu_item_id,
-        quantity: it.quantity,
-        unit_price: Number(it.unit_price ?? 0),
-        status: it.status,
-        ready_at: it.ready_at,
-        served_at: it.served_at,
-        notes: it.notes,
-        menu_item_name: it.menu_items?.name ?? "",
-      }));
+      const items = (row.order_items ?? []).map(mapOrderItemRow);
       const { order_items: _omit, ...orderRow } = row;
       return {
         ...orderRow,
@@ -1167,11 +1222,7 @@ app.get("/api/orders/unpaid", async (req, res) => {
       .select(
         `id, table_id, status, total_price, created_at, submitted_at,
          ready_at, served_at, guest_note, paid_at,
-         order_items:order_items (
-           id, order_id, menu_item_id, quantity, unit_price, status,
-           ready_at, served_at, notes,
-           menu_items:menu_items ( id, name )
-         )`
+         order_items:order_items ( ${ITEM_ORDER_ITEMS_SELECT} )`
       )
       .is("paid_at", null)
       .order("created_at", { ascending: true });
@@ -1180,18 +1231,7 @@ app.get("/api/orders/unpaid", async (req, res) => {
       return res.status(500).json({ error: error.message });
     }
     const rows = (data ?? []).map((row) => {
-      const items = (row.order_items ?? []).map((it) => ({
-        id: it.id,
-        order_id: it.order_id,
-        menu_item_id: it.menu_item_id,
-        quantity: it.quantity,
-        unit_price: Number(it.unit_price ?? 0),
-        status: it.status,
-        ready_at: it.ready_at,
-        served_at: it.served_at,
-        notes: it.notes,
-        menu_item_name: it.menu_items?.name ?? "",
-      }));
+      const items = (row.order_items ?? []).map(mapOrderItemRow);
       const { order_items: _omit, ...orderRow } = row;
       return {
         ...orderRow,
@@ -1264,13 +1304,14 @@ app.patch("/api/orders/:id/items/:itemId/status", async (req, res) => {
       .update(patch)
       .eq("id", itemId)
       .eq("order_id", orderId)
+      .neq("status", "canceled")
       .select("id");
     if (itemErr) {
       console.error("[api/orders PATCH item]", itemErr);
       return res.status(500).json({ error: itemErr.message });
     }
     if (!itemRows || itemRows.length === 0) {
-      return res.status(404).json({ error: "Order item not found" });
+      return res.status(404).json({ error: "Order item not found (or already canceled)" });
     }
 
     // Recompute parent order status (and stamp ready_at / served_at on
@@ -1339,6 +1380,339 @@ app.patch("/api/orders/:id/items/:itemId/status", async (req, res) => {
     return res.status(500).json({ error: "Internal server error" });
   }
 });
+
+/**
+ * Recomputes and persists the parent order's `status` after an item's
+ * lifecycle changed (shared by the plain status PATCH above and the two
+ * cancellation endpoints below, which also need to re-derive it).
+ */
+async function syncOrderStatusAfterItemChange(orderId, nowIso) {
+  const { data: sibs, error: sibErr } = await supabase
+    .from("order_items")
+    .select("status")
+    .eq("order_id", orderId);
+  if (sibErr) return { error: sibErr };
+
+  const { data: parent, error: parentErr } = await supabase
+    .from("orders")
+    .select("status, ready_at, served_at")
+    .eq("id", orderId)
+    .single();
+  if (parentErr || !parent) {
+    return { error: parentErr ?? new Error("Order not found") };
+  }
+
+  const nextStatus = normalizeOrderStatusFromItems(sibs, parent.status);
+  const orderPatch = {};
+  if (nextStatus !== parent.status) orderPatch.status = nextStatus;
+  if (nextStatus === "ready" && !parent.ready_at) orderPatch.ready_at = nowIso;
+  if (nextStatus === "delivered" && !parent.served_at) {
+    orderPatch.served_at = nowIso;
+    if (!parent.ready_at) orderPatch.ready_at = nowIso;
+  }
+  if (Object.keys(orderPatch).length > 0) {
+    const { error: upErr } = await supabase
+      .from("orders")
+      .update(orderPatch)
+      .eq("id", orderId);
+    if (upErr) return { error: upErr };
+  }
+  return { nextStatus, orderPatch };
+}
+
+// ============================================================================
+// Order item cancellation
+// ----------------------------------------------------------------------------
+//   - PATCH /api/orders/:id/items/:itemId/cancel               manager direct cancel (immediate)
+//   - POST  /api/orders/:id/items/:itemId/resolve-cancellation  manager approve/reject an AI-waiter request
+//   - requestItemCancellationByName(...)                        used by the AI's request_item_cancellation tool call
+// ============================================================================
+
+// Manager cancels a dish directly — takes effect immediately, no approval step.
+app.patch("/api/orders/:id/items/:itemId/cancel", async (req, res) => {
+  try {
+    const orderId = (req.params.id ?? "").trim();
+    const itemId = (req.params.itemId ?? "").trim();
+    const reason = (req.body?.reason ?? "").toString().trim();
+    if (!orderId || !itemId) {
+      return res.status(400).json({ error: "Missing order or item id" });
+    }
+    if (!reason) {
+      return res.status(400).json({ error: "A cancellation reason is required" });
+    }
+
+    const nowIso = new Date().toISOString();
+    const { data: itemRow, error: itemErr } = await supabase
+      .from("order_items")
+      .update({
+        status: "canceled",
+        cancellation_status: "approved",
+        cancellation_reason: reason,
+        canceled_by: "manager",
+        canceled_at: nowIso,
+        cancellation_resolved_at: nowIso,
+      })
+      .eq("id", itemId)
+      .eq("order_id", orderId)
+      .neq("status", "canceled")
+      .select("id")
+      .single();
+    if (itemErr) {
+      if (itemErr.code === "PGRST116") {
+        return res.status(404).json({ error: "Order item not found (or already canceled)" });
+      }
+      console.error("[api/orders cancel item]", itemErr);
+      return res.status(500).json({ error: itemErr.message });
+    }
+
+    const { total, error: totalErr } = await recomputeOrderTotal(orderId);
+    if (totalErr) {
+      console.error("[api/orders cancel item] recomputeOrderTotal", totalErr);
+      return res.status(500).json({ error: totalErr.message });
+    }
+
+    const { nextStatus, orderPatch, error: syncErr } =
+      await syncOrderStatusAfterItemChange(orderId, nowIso);
+    if (syncErr) {
+      console.error("[api/orders cancel item] syncOrderStatusAfterItemChange", syncErr);
+      return res
+        .status(500)
+        .json({ error: syncErr.message ?? "Could not update order status" });
+    }
+
+    if (io) {
+      io.emit("order_item_status_changed", {
+        order_id: orderId,
+        item_id: itemId,
+        status: "canceled",
+        cancellation_reason: reason,
+        canceled_by: "manager",
+        canceled_at: nowIso,
+        total_price: total,
+      });
+      if (orderPatch && Object.keys(orderPatch).length > 0) {
+        io.emit("order_status_changed", {
+          order_id: orderId,
+          status: nextStatus,
+          ready_at: orderPatch.ready_at,
+          served_at: orderPatch.served_at,
+        });
+      }
+    }
+
+    return res.json({
+      ok: true,
+      order_id: orderId,
+      item_id: itemId,
+      status: "canceled",
+      total_price: total,
+    });
+  } catch (err) {
+    console.error("[api/orders cancel item]", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Manager approves or rejects a cancellation the AI waiter filed on a
+// guest's behalf. Approve => same effect as a direct cancel (item stays
+// attributed to whoever originally requested it via `canceled_by`).
+// Reject => item stays active; the rejection itself is logged via
+// cancellation_status='rejected' + cancellation_resolved_at.
+app.post("/api/orders/:id/items/:itemId/resolve-cancellation", async (req, res) => {
+  try {
+    const orderId = (req.params.id ?? "").trim();
+    const itemId = (req.params.itemId ?? "").trim();
+    const decision = (req.body?.decision ?? "").toString().trim().toLowerCase();
+    if (!orderId || !itemId) {
+      return res.status(400).json({ error: "Missing order or item id" });
+    }
+    if (decision !== "approve" && decision !== "reject") {
+      return res.status(400).json({ error: "decision must be 'approve' or 'reject'" });
+    }
+
+    const nowIso = new Date().toISOString();
+    const patch =
+      decision === "approve"
+        ? {
+            status: "canceled",
+            cancellation_status: "approved",
+            canceled_at: nowIso,
+            cancellation_resolved_at: nowIso,
+          }
+        : { cancellation_status: "rejected", cancellation_resolved_at: nowIso };
+
+    const { data: itemRow, error: itemErr } = await supabase
+      .from("order_items")
+      .update(patch)
+      .eq("id", itemId)
+      .eq("order_id", orderId)
+      .eq("cancellation_status", "requested")
+      .select("id, cancellation_reason")
+      .single();
+    if (itemErr) {
+      if (itemErr.code === "PGRST116") {
+        return res
+          .status(404)
+          .json({ error: "No pending cancellation request found for this item" });
+      }
+      console.error("[api/orders resolve-cancellation]", itemErr);
+      return res.status(500).json({ error: itemErr.message });
+    }
+
+    let total = null;
+    let nextStatus = null;
+    let orderPatch = {};
+    if (decision === "approve") {
+      const totalResult = await recomputeOrderTotal(orderId);
+      if (totalResult.error) {
+        console.error(
+          "[api/orders resolve-cancellation] recomputeOrderTotal",
+          totalResult.error
+        );
+        return res.status(500).json({ error: totalResult.error.message });
+      }
+      total = totalResult.total;
+
+      const syncResult = await syncOrderStatusAfterItemChange(orderId, nowIso);
+      if (syncResult.error) {
+        console.error(
+          "[api/orders resolve-cancellation] syncOrderStatusAfterItemChange",
+          syncResult.error
+        );
+        return res
+          .status(500)
+          .json({ error: syncResult.error.message ?? "Could not update order status" });
+      }
+      nextStatus = syncResult.nextStatus;
+      orderPatch = syncResult.orderPatch ?? {};
+    }
+
+    if (io) {
+      io.emit("order_item_cancellation_resolved", {
+        order_id: orderId,
+        item_id: itemId,
+        decision,
+      });
+      if (decision === "approve") {
+        io.emit("order_item_status_changed", {
+          order_id: orderId,
+          item_id: itemId,
+          status: "canceled",
+          cancellation_reason: itemRow.cancellation_reason,
+          canceled_at: nowIso,
+          total_price: total,
+        });
+        if (Object.keys(orderPatch).length > 0) {
+          io.emit("order_status_changed", {
+            order_id: orderId,
+            status: nextStatus,
+            ready_at: orderPatch.ready_at,
+            served_at: orderPatch.served_at,
+          });
+        }
+      }
+    }
+
+    return res.json({
+      ok: true,
+      order_id: orderId,
+      item_id: itemId,
+      decision,
+      total_price: total,
+    });
+  } catch (err) {
+    console.error("[api/orders resolve-cancellation]", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * Used by the AI waiter's `request_item_cancellation` tool call — it only
+ * knows a table id and a dish name, not an order/item id, so this resolves
+ * the most recently-placed, still-active (non-canceled, not already
+ * pending) matching line for that table and files the request against it.
+ * Does NOT touch `status` or the order total — see the schema comment in
+ * backend/sql/order_items_cancellation.sql for why.
+ */
+async function requestItemCancellationByName({ tableId, itemName, reason }) {
+  const table = (tableId ?? "").toString().trim();
+  const name = (itemName ?? "").toString().trim();
+  if (!table || !name) {
+    return { error: { message: "Missing table or item name" } };
+  }
+
+  const { data: orders, error: ordersErr } = await supabase
+    .from("orders")
+    .select(
+      `id, table_id, created_at,
+       order_items:order_items (
+         id, order_id, menu_item_id, quantity, status, cancellation_status,
+         menu_items:menu_items ( id, name )
+       )`
+    )
+    .eq("table_id", table)
+    .is("paid_at", null)
+    .order("created_at", { ascending: false });
+  if (ordersErr) {
+    return { error: ordersErr };
+  }
+
+  const needle = name.toLowerCase();
+  let match = null;
+  for (const order of orders ?? []) {
+    for (const it of order.order_items ?? []) {
+      const itName = (it.menu_items?.name ?? "").trim().toLowerCase();
+      if (!itName || itName !== needle) continue;
+      if (it.status === "canceled") continue;
+      if (it.cancellation_status === "requested") continue;
+      match = {
+        orderId: order.id,
+        itemId: it.id,
+        menuItemId: it.menu_item_id,
+        quantity: it.quantity,
+        menuItemName: it.menu_items?.name ?? "",
+      };
+      break;
+    }
+    if (match) break;
+  }
+  if (!match) {
+    return {
+      error: {
+        message: `No active order item named "${name}" found for table ${table}`,
+      },
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const cleanReason = (reason ?? "").toString().trim() || "No reason given";
+  const { error: updErr } = await supabase
+    .from("order_items")
+    .update({
+      cancellation_status: "requested",
+      cancellation_reason: cleanReason,
+      canceled_by: "ai_waiter",
+    })
+    .eq("id", match.itemId);
+  if (updErr) {
+    return { error: updErr };
+  }
+
+  if (io) {
+    io.emit("order_item_cancellation_requested", {
+      order_id: match.orderId,
+      item_id: match.itemId,
+      table_id: table,
+      menu_item_id: match.menuItemId,
+      menu_item_name: match.menuItemName,
+      quantity: match.quantity,
+      reason: cleanReason,
+      requested_at: nowIso,
+    });
+  }
+
+  return { ok: true, order_id: match.orderId, item_id: match.itemId };
+}
 
 // ============================================================================
 // Analytics: read-only aggregations for the Manager dashboard.
@@ -1691,6 +2065,31 @@ ${compactMenu}`;
       if (io) io.emit("new_runner_alert", alert);
     }
 
+    // Server-side tool: the AI files a cancellation request against an
+    // already-submitted order line. This never cancels anything itself —
+    // it only sets cancellation_status='requested' for a manager to review.
+    for (const tc of tool_calls) {
+      if (tc.name !== "request_item_cancellation") continue;
+      const args = tc.arguments ?? {};
+      const itemName =
+        typeof args.item_name === "string" ? args.item_name.trim() : "";
+      const reason = typeof args.reason === "string" ? args.reason.trim() : "";
+      if (!itemName) continue;
+      const result = await requestItemCancellationByName({
+        tableId: tableKey,
+        itemName,
+        reason,
+      });
+      if (result.error) {
+        console.warn(
+          "[api/chat] request_item_cancellation failed:",
+          result.error.message ?? result.error
+        );
+      } else {
+        console.log("[api/chat] AI request_item_cancellation ->", result);
+      }
+    }
+
     // submit_order: the AI tells us to ship the cart. The cart is held on
     // the client (authoritative), so we expect the client to have sent the
     // current cart in a parallel /api/orders call (GuestMenu flow) OR, for
@@ -1725,7 +2124,8 @@ ${compactMenu}`;
         t.name === "update_cart" ||
         t.name === "submit_order" ||
         t.name === "request_runner" ||
-        t.name === "request_check"
+        t.name === "request_check" ||
+        t.name === "request_item_cancellation"
     );
 
     if (hasClientTools) {

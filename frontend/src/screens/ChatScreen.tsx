@@ -125,18 +125,16 @@ function cartLinesFromStore(): ChatCartLine[] {
 
 function categoryRank(name: string): number {
   const n = name.toLowerCase().trim();
-  if (n === "food") return 0;
-  if (n === "desserts" || n === "dessert" || n === "deserts" || n === "desert") return 1;
-  if (n === "drinks" || n === "drink") return 2;
-  return 3;
+  if (n === "starters") return 0;
+  if (n === "main") return 1;
+  if (n === "desserts" || n === "dessert" || n === "deserts" || n === "desert") return 2;
+  if (n === "drinks" || n === "drink") return 3;
+  return 4;
 }
 
-/** Within Food, Starters sort before Main Courses; untagged items sort last. */
+/** Tie-break for sections that share a categoryRank (only used for non-food subcategories now). */
 function subcategoryRank(name: string): number {
   const n = name.toLowerCase().trim();
-  if (n === "starters" || n === "starter" || n === "appetizers") return 0;
-  if (n === "main courses" || n === "main course" || n === "mains" || n === "main")
-    return 1;
   if (!n) return 99;
   return 50;
 }
@@ -159,36 +157,72 @@ type MenuSection = {
 };
 
 /**
- * One section per (category, subcategory) pair — e.g. Food splits into
- * "Food · Starters" and "Food · Main Courses" once items are tagged;
- * categories with no subcategory data (Desserts, Drinks, untagged Food)
- * get one plain section titled just by category, same as before.
+ * One section per top-level category. "Food" is not shown as its own
+ * section — items tagged category=food are re-keyed by their subcategory
+ * (starters/mains) so they become plain "Starters"/"Main" sections, same
+ * level as Desserts/Drinks, instead of nesting under a "Food" wrapper.
  */
 function buildMenuSections(items: MenuItemRow[]): MenuSection[] {
-  const byGroup = new Map<string, MenuItemRow[]>();
+  const groups = new Map<
+    string,
+    { title: string; categoryKey: string; subcategoryKey: string; data: MenuItemRow[] }
+  >();
+
   for (const item of items) {
     if (!item.is_available) continue;
-    const categoryKey = item.category.trim() || "General";
-    const subcategoryKey = (item.subcategory ?? "").trim();
-    const groupKey = `${categoryKey.toLowerCase()}::${subcategoryKey.toLowerCase()}`;
-    const arr = byGroup.get(groupKey) ?? [];
-    arr.push(item);
-    byGroup.set(groupKey, arr);
+    const rawCategory = item.category.trim() || "General";
+    const categoryKeyRaw = rawCategory.toLowerCase();
+    const rawSubcategory = (item.subcategory ?? "").trim();
+    const subcategoryKeyRaw = rawSubcategory.toLowerCase();
+
+    let categoryKey = categoryKeyRaw;
+    let subcategoryKey = subcategoryKeyRaw;
+    let title: string;
+
+    if (categoryKeyRaw === "food" || categoryKeyRaw === "foods") {
+      if (subcategoryKeyRaw === "starters" || subcategoryKeyRaw === "starter" || subcategoryKeyRaw === "appetizers") {
+        categoryKey = "starters";
+        title = "Starters";
+      } else if (
+        subcategoryKeyRaw === "mains" ||
+        subcategoryKeyRaw === "main" ||
+        subcategoryKeyRaw === "main course" ||
+        subcategoryKeyRaw === "main courses"
+      ) {
+        categoryKey = "main";
+        title = "Main";
+      } else if (subcategoryKeyRaw) {
+        categoryKey = subcategoryKeyRaw;
+        title = titleCaseCategory(rawSubcategory);
+      } else {
+        categoryKey = "main";
+        title = "Main";
+      }
+      subcategoryKey = "";
+    } else {
+      const categoryLabel = titleCaseCategory(rawCategory);
+      title = subcategoryKey
+        ? `${categoryLabel} · ${titleCaseCategory(rawSubcategory)}`
+        : categoryLabel;
+    }
+
+    const groupKey = `${categoryKey}::${subcategoryKey}`;
+    const g = groups.get(groupKey);
+    if (g) {
+      g.data.push(item);
+    } else {
+      groups.set(groupKey, { title, categoryKey, subcategoryKey, data: [item] });
+    }
   }
 
   const sections: MenuSection[] = [];
-  for (const [groupKey, data] of byGroup.entries()) {
-    const [categoryKey, subcategoryKey] = groupKey.split("::");
-    data.sort((a, b) => a.name.localeCompare(b.name));
-    const categoryLabel = titleCaseCategory(categoryKey);
-    const title = subcategoryKey
-      ? `${categoryLabel} · ${titleCaseCategory(subcategoryKey)}`
-      : categoryLabel;
+  for (const g of groups.values()) {
+    g.data.sort((a, b) => a.name.localeCompare(b.name));
     sections.push({
-      title,
-      categoryRankValue: categoryRank(categoryKey),
-      subcategoryRankValue: subcategoryRank(subcategoryKey),
-      data,
+      title: g.title,
+      categoryRankValue: categoryRank(g.categoryKey),
+      subcategoryRankValue: subcategoryRank(g.subcategoryKey),
+      data: g.data,
     });
   }
 
@@ -386,6 +420,13 @@ export function ChatScreen({ navigation, route }: Props) {
         // in POST /api/chat so the Runner tablet sees it immediately. We
         // just log it here for debugging.
         console.log("[Chat] Tool call (request_runner):", tc);
+        continue;
+      }
+      if (normToolName(tc.name) === "request_item_cancellation") {
+        // Side effect (filing the cancellation request for manager review)
+        // is handled by the server in POST /api/chat. It never cancels the
+        // item itself — just logged here for debugging.
+        console.log("[Chat] Tool call (request_item_cancellation):", tc);
         continue;
       }
       if (normToolName(tc.name) !== "update_cart") continue;

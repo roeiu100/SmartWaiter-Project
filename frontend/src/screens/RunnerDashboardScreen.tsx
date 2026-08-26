@@ -159,16 +159,21 @@ function RunnerOrderTicket({
   const isStale = ageMs >= STALE_AFTER_MS;
   const elapsedColor = getElapsedTimeColor(ageMs);
 
-  const readyCount = order.items.filter((it) => it.status === "ready").length;
+  // Canceled dishes never show on the ticket. Items still awaiting a
+  // manager's cancellation decision keep showing normally — nothing's been
+  // approved yet.
+  const liveItems = order.items.filter((it) => it.status !== "canceled");
+
+  const readyCount = liveItems.filter((it) => it.status === "ready").length;
   const canDeliverAll = readyCount > 0;
 
-  const totalItems = order.items.length;
+  const totalItems = liveItems.length;
   const hasHidden = totalItems > COLLAPSED_ITEM_COUNT;
   const hiddenCount = totalItems - COLLAPSED_ITEM_COUNT;
   const visibleItems =
     isExpanded || !hasHidden
-      ? order.items
-      : order.items.slice(0, COLLAPSED_ITEM_COUNT);
+      ? liveItems
+      : liveItems.slice(0, COLLAPSED_ITEM_COUNT);
 
   const onPressCard = () => {
     if (isExpanded) {
@@ -384,7 +389,8 @@ function RunnerOrderDetailModal({
     setCheckedItems(new Set());
   }, [order.id]);
 
-  const readyCount = order.items.filter((it) => it.status === "ready").length;
+  const liveItems = order.items.filter((it) => it.status !== "canceled");
+  const readyCount = liveItems.filter((it) => it.status === "ready").length;
   const canDeliverAll = readyCount > 0;
   const ageMs = getOrderElapsedMs(order.created_at, currentTime);
   const isStale = ageMs >= STALE_AFTER_MS;
@@ -456,7 +462,7 @@ function RunnerOrderDetailModal({
           >
             <Text style={styles.modalSectionTitle}>All items</Text>
 
-            {order.items.map((line) => {
+            {liveItems.map((line) => {
               const notes = (line.notes ?? "").trim();
               const isReady = line.status === "ready";
               const isServed = line.status === "served";

@@ -35,6 +35,9 @@ import {
   useManagerAlertsStore,
   type ManagerAlert,
 } from "../store/managerAlertsStore";
+import { usePendingCancellationsStore } from "../store/pendingCancellationsStore";
+import type { ManagerTabParamList } from "../navigation/types";
+import type { BottomTabNavigationProp } from "@react-navigation/bottom-tabs";
 
 /**
  * Shared Manager socket. Cached on globalThis so that Metro Fast Refresh
@@ -186,6 +189,7 @@ export function ManagerScreen({ navigation }: Props) {
   const managerAlerts = useManagerAlertsStore((s) => s.alerts);
   const removeAlertByTable = useManagerAlertsStore((s) => s.removeByTable);
   const blockedTables = useManagerAlertsStore((s) => s.blockedTables);
+  const pendingCancellations = usePendingCancellationsStore((s) => s.items);
 
   const loadMenu = useCallback(async (opts?: { silent?: boolean }) => {
     const silent = opts?.silent === true;
@@ -581,13 +585,13 @@ export function ManagerScreen({ navigation }: Props) {
   );
 
   // Group menu items into collapsible category sections. Priority order
-  // mirrors the guest menu (Food → Desserts → Drinks → everything else
-  // alphabetically), and — new — within Food, items with a `subcategory`
-  // (starters/mains) get their own header ("Food — Starters", "Food —
-  // Mains") instead of one flat Food group; untagged Food items still fall
-  // into one plain "Food" group. Rows are flattened into a mixed
-  // header/item array so the existing FlatList can keep windowed rendering
-  // for large menus.
+  // mirrors the guest menu (Starters → Main → Desserts → Drinks → everything
+  // else alphabetically). "Food" is not shown as its own heading — items
+  // tagged category=food are re-keyed by their subcategory (starters/mains)
+  // so they group directly as top-level "Starters"/"Main" sections, same
+  // level as Desserts/Drinks. Rows are flattened into a mixed header/item
+  // array so the existing FlatList can keep windowed rendering for large
+  // menus.
   type MenuRow =
     | {
         kind: "header";
@@ -602,12 +606,13 @@ export function ManagerScreen({ navigation }: Props) {
 
   const menuRows = useMemo<MenuRow[]>(() => {
     const CATEGORY_RANK: Record<string, number> = {
-      food: 0,
-      desserts: 1,
+      starters: 0,
+      main: 1,
+      desserts: 2,
       // Real data currently has "deserts" (one s) — accept both spellings
       // so ordering is correct regardless of which one is on a given row.
-      deserts: 1,
-      drinks: 2,
+      deserts: 2,
+      drinks: 3,
     };
     const SUBCATEGORY_RANK: Record<string, number> = {
       starters: 0,
@@ -636,10 +641,33 @@ export function ManagerScreen({ navigation }: Props) {
     >();
     for (const it of menuItems) {
       const rawCategory = (it.category ?? "").trim();
-      const categoryKey = rawCategory.toLowerCase() || "uncategorized";
-      const categoryLabel = rawCategory ? titleCase(rawCategory) : "Uncategorized";
+      const categoryKeyRaw = rawCategory.toLowerCase() || "uncategorized";
       const rawSubcategory = (it.subcategory ?? "").trim();
-      const subcategoryKey = rawSubcategory.toLowerCase();
+      const subcategoryKeyRaw = rawSubcategory.toLowerCase();
+
+      let categoryKey = categoryKeyRaw;
+      let categoryLabel = rawCategory ? titleCase(rawCategory) : "Uncategorized";
+      let subcategoryKey = subcategoryKeyRaw;
+
+      if (categoryKeyRaw === "food" || categoryKeyRaw === "foods") {
+        // Food has been fully replaced by its subcategories as top-level
+        // groups — there is no "Food" heading anymore.
+        if (SUBCATEGORY_RANK[subcategoryKeyRaw] === 0) {
+          categoryKey = "starters";
+          categoryLabel = "Starters";
+        } else if (SUBCATEGORY_RANK[subcategoryKeyRaw] === 1) {
+          categoryKey = "main";
+          categoryLabel = "Main";
+        } else if (subcategoryKeyRaw) {
+          categoryKey = subcategoryKeyRaw;
+          categoryLabel = titleCase(rawSubcategory);
+        } else {
+          categoryKey = "main";
+          categoryLabel = "Main";
+        }
+        subcategoryKey = "";
+      }
+
       const label = subcategoryKey
         ? `${categoryLabel} — ${titleCase(rawSubcategory)}`
         : categoryLabel;
@@ -736,6 +764,33 @@ export function ManagerScreen({ navigation }: Props) {
           <Text style={styles.analyticsBtnLabel}>View Analytics</Text>
         </Pressable>
       </View>
+
+      {/* Pending AI-waiter cancellation requests — full approve/reject UI
+          lives on the Tables tab (it already has the per-table order data);
+          this is just a visible pointer over here, mirroring the badge on
+          the Tables tab icon. */}
+      {pendingCancellations.length > 0 ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`${pendingCancellations.length} pending cancellation requests — review in Tables`}
+          onPress={() =>
+            (
+              navigation.getParent() as
+                | BottomTabNavigationProp<ManagerTabParamList>
+                | undefined
+            )?.navigate("TablesTab")
+          }
+          style={({ pressed }) => [
+            styles.cancellationBanner,
+            pressed && styles.cancellationBannerPressed,
+          ]}
+        >
+          <Text style={styles.cancellationBannerText}>
+            🔔 {pendingCancellations.length} pending cancellation
+            {pendingCancellations.length === 1 ? "" : "s"} — review in Tables
+          </Text>
+        </Pressable>
+      ) : null}
 
       {/* Manager alerts — rendered OUTSIDE the menu FlatList so state updates
           always repaint. Own FlatList with scrollEnabled=false so it doesn't
@@ -1563,6 +1618,22 @@ const styles = StyleSheet.create({
     color: "#B91C1C",
     fontSize: 12,
     fontWeight: "700",
+  },
+  cancellationBanner: {
+    marginHorizontal: 20,
+    marginBottom: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    backgroundColor: "#FEF3C7",
+    borderWidth: 1,
+    borderColor: "#FDE68A",
+  },
+  cancellationBannerPressed: { opacity: 0.85 },
+  cancellationBannerText: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#92400E",
   },
   alertsSection: {
     flexShrink: 0,

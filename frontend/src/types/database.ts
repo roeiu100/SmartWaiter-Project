@@ -68,7 +68,18 @@ export interface RunnerOptionRow {
 }
 
 /** Table: order_items — per-line status (e.g. partial prep) */
-export type OrderItemLineStatus = "pending" | "ready" | "served";
+export type OrderItemLineStatus = "pending" | "ready" | "served" | "canceled";
+
+/**
+ * Cancellation sub-state, independent of `status` above — see
+ * backend/sql/order_items_cancellation.sql. "requested" = the AI waiter
+ * filed it on the guest's behalf; `status` stays untouched until a manager
+ * resolves it. A manager's direct cancel skips straight to "approved".
+ */
+export type CancellationStatus = "none" | "requested" | "approved" | "rejected";
+
+/** Who initiated a cancellation (direct or requested). */
+export type CanceledBy = "manager" | "ai_waiter";
 
 export interface OrderItemRow {
   id: UUID;
@@ -77,4 +88,8 @@ export interface OrderItemRow {
   status: OrderItemLineStatus;
   /** Add this column in PostgreSQL if you store line qty (recommended). */
   quantity?: number;
+  cancellation_status?: CancellationStatus;
+  cancellation_reason?: string | null;
+  canceled_by?: CanceledBy | null;
+  canceled_at?: string | null;
 }
