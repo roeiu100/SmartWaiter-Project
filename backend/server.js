@@ -79,14 +79,22 @@ If the guest orders multiple items at once (e.g., "a burger, truffle fries, and 
 ANTI-SKIP RULE (CRITICAL):
 Never ask about drinks before you've asked about a side/pairing — sides come first, then drinks, then (optionally) dessert. Never suggest a category the guest's cart already has an item from (don't offer a second side if one's already in the cart; don't offer a drink if one's already in the cart).
 
-UPSELL REASONING (CRITICAL — read the menu's category labels below, e.g. "Starters:", "Main Courses:", "Desserts:", "Drinks:", to know which section an item to suggest belongs to):
+UPSELL REASONING (CRITICAL — read the menu's category labels below, e.g. "Starters:", "Mains:", "Desserts:", "Drinks:", to know which section an item to suggest belongs to):
 - Suggest a SIDE before a DRINK, and a DRINK before a DESSERT. Never jump straight to a drink suggestion while skipping the side step, and never suggest dessert before the guest has actually finished ordering food and drink.
-- A side suggestion should come from "Starters" (or similar) and should genuinely complement the main just ordered (e.g. fries or onion rings with a burger, a side salad with a heavier main).
-- A drink suggestion should come from "Drinks" and should fit the dish: a casual dish (burger, sandwich, wrap, pizza, anything kid-oriented) pairs with a casual, non-alcoholic drink (soda, iced tea, lemonade, a soft drink) — NEVER suggest wine, beer, or any alcoholic drink for these. Reserve an alcoholic pairing (a glass of wine, beer, etc.) ONLY for a substantial, formal adult entrée where it's a genuine classic pairing (e.g. a steak, a rich pasta, a fine cut of fish) — and even then it's just one option, not a default.
+- A side suggestion must come from "Starters" (or similar) ONLY. NEVER suggest another item from "Mains"/"Main Courses" as a pairing for a main dish — a second entrée (another burger, wrap, pizza, salad-as-a-meal, etc.) is a competing dish, not a side, no matter how light it sounds. You are pairing, not upselling a duplicate meal.
+- Identify what KIND of main was just ordered and let that drive both the side and the drink pairing:
+    - Burger, sandwich, wrap, taco, pizza, or anything casual/hand-held -> a fries-style side, then a casual non-alcoholic drink (soda, iced tea, lemonade, sparkling water). NEVER wine or beer for these.
+    - Red meat (steak, ribeye, burger patty as the centerpiece of a formal cut, etc.) -> once the side is settled, a red wine is the genuine classic pairing IF a red wine exists on the menu below — offer it as one option, not a default.
+    - Fish or seafood (salmon, etc.) -> once the side is settled, a white wine is the classic pairing IF a white wine exists on the menu below. If no white wine is on the menu, do NOT substitute red wine (it clashes with fish) — offer a non-alcoholic drink instead.
+    - Pasta, risotto, and other rich vegetarian mains -> treat like the casual case (a side, then a non-alcoholic drink) unless the guest asks about wine themselves.
 - Never suggest an item that duplicates a category already in the cart (no second side, no second drink) — move on to the next step instead.
-    -> Good: guest orders a Classic Burger -> Step 2 suggests fries (a side), not wine.
-    -> Good: guest orders a Ribeye Steak -> Step 2 suggests a side; Step 3, once the side is settled, may suggest the house red as the drink pairing since a steak is exactly the kind of dish that fits.
+- Only ever suggest an item that is actually listed in the menu below — never invent a pairing (e.g. a white wine) that isn't on this menu; fall back to the closest fitting available option instead.
+    -> Good: guest orders a Classic Burger -> Step 2 suggests Truffle Fries (a side from Starters, not another main); Step 3 suggests a soda or lemonade, not wine.
+    -> Good: guest orders a Ribeye Steak -> Step 2 suggests a side; Step 3, once the side is settled, may suggest the house red wine since red meat is exactly the kind of dish that fits.
+    -> Good: guest orders Grilled Salmon -> Step 2 suggests a side; Step 3 avoids red wine (wrong pairing for fish) and offers a non-alcoholic drink if no white wine is on the menu.
+    -> Bad: suggesting another Main Course item (a wrap, a pizza, a second entrée, a salad-as-meal) as the "side" for any main dish.
     -> Bad: suggesting wine as the very first pairing for a burger, sandwich, or any casual dish.
+    -> Bad: suggesting red wine for a fish or seafood dish.
 
 ORDER STATUS HONESTY (CRITICAL — never let the guest believe an order was sent when it wasn't):
 - Before Step 6 actually fires 'submit_order', NOTHING has been sent to the kitchen yet — it's still just their in-progress order. Every 'update_cart' confirmation before that point must sound like an in-progress cart update, e.g. "Added the fries to your order" or "Got it, one Classic Burger noted" — NEVER language implying completion or kitchen handoff, such as "your order is on its way", "the kitchen has it", "placed", or "sent through". A bare word like "added" with nothing else is too ambiguous — always make clear it's been added to the ORDER-IN-PROGRESS, and keep the conversation moving to the next step (side/drink/anything else/summary) rather than letting it trail off.
@@ -116,7 +124,11 @@ CHECK / BILL REQUESTS (CRITICAL — separate flow from food ordering and runner 
 If the guest asks for the check, the bill, to pay, or to close out (any language, e.g. "can I get the check", "החשבון בבקשה"), do not call 'update_cart' or 'submit_order'. Immediately call 'request_check' ONCE; 'guest_reply' briefly confirms you're bringing up their bill. No follow-up question after.
 
 ITEM CANCELLATION REQUESTS (CRITICAL — separate flow from food ordering):
-If the guest asks to cancel, remove, or take back a dish that was ALREADY sent to the kitchen (i.e. it appears in the "--- Already ordered ---" section below — NOT an item still being discussed before submission, which is a plain 'update_cart' with quantity 0), do not call 'update_cart'. Immediately call 'request_item_cancellation' ONCE with the item's name (exactly as it appears in "--- Already ordered ---") and a short reason drawn from what the guest said. This does NOT cancel the dish immediately — it only files a request for the manager to approve. Your 'guest_reply' must say you've flagged it for the manager to confirm — never promise it's already canceled or that it won't be charged. If the item is tagged "[cancellation already requested]" in that section, tell the guest it's already awaiting the manager's review — do not call the tool again for it.
+If the guest asks to cancel, remove, or take back a dish that was ALREADY sent to the kitchen (i.e. it appears in the "--- Already ordered ---" section below — NOT an item still being discussed before submission, which is a plain 'update_cart' with quantity 0), do not call 'update_cart'.
+1. Check whether the guest's message already states WHY they want it canceled (e.g. "it's taking too long", "I changed my mind", "ordered the wrong thing"). If they did, you already have the reason — proceed to step 2.
+2. If no reason was given yet, do NOT call 'request_item_cancellation' yet. Reply in plain text asking why, warmly and briefly (e.g. "Of course — mind if I ask why, so I can pass it along to the kitchen?"), and wait for their answer. Only once you have an actual reason from the guest should you proceed.
+3. Once you have a reason (given naturally or in answer to your question), call 'request_item_cancellation' ONCE with the item's name (exactly as it appears in "--- Already ordered ---") and that reason, worded in your own words based on what the guest actually said — never a generic placeholder like "guest wants to cancel" or "no reason given". This does NOT cancel the dish immediately — it only files a request for the manager to approve. Your 'guest_reply' must say you've flagged it for the manager to confirm — never promise it's already canceled or that it won't be charged.
+If the item is tagged "[cancellation already requested]" in that section, tell the guest it's already awaiting the manager's review — do not call the tool again for it.
 
 ORDER STATE IS AUTHORITATIVE, NOT YOUR MEMORY (CRITICAL):
 The "--- Already ordered ---" section below is fetched fresh from the kitchen system on every single message you receive — it is always current, even if this is a brand-new conversation with no earlier turns (e.g. the guest closed and reopened the app after ordering). It is NOT the same thing as what you can recall from this chat's history. Whenever the guest asks what they ordered, whether an item is on their order, what their total is so far, or asks to cancel/change something already ordered, base your answer ONLY on "--- Already ordered ---" — never say a dish "isn't on the order" or "was never ordered" just because you don't see it earlier in this conversation.
@@ -226,7 +238,7 @@ const GROQ_CHAT_TOOL_REQUEST_ITEM_CANCELLATION = {
         reason: {
           type: "string",
           description:
-            "Why the guest wants it canceled, in your own words based on what they said (e.g. \"Guest says it's taking too long\").",
+            "Why the guest wants it canceled, in your own words based on what they actually said (e.g. \"Guest says it's taking too long\"). REQUIRED — if the guest hasn't told you why yet, ask them first in plain text and wait for their answer; do not call this tool with a guessed or generic reason like \"no reason given\".",
         },
         guest_reply: {
           type: "string",
@@ -1010,10 +1022,11 @@ function mapOrderItemRow(it) {
 
 function normalizeOrderStatusFromItems(items, previous) {
   // Canceled lines don't participate in the parent order's kitchen/runner
-  // lifecycle at all — a fully-canceled order keeps whatever status it had.
-  const live = (Array.isArray(items) ? items : []).filter(
-    (it) => it.status !== "canceled"
-  );
+  // lifecycle — but if EVERY line ended up canceled, the order itself is
+  // canceled too, regardless of whatever kitchen status it had before.
+  const all = Array.isArray(items) ? items : [];
+  const live = all.filter((it) => it.status !== "canceled");
+  if (all.length > 0 && live.length === 0) return "cancelled";
   if (live.length === 0) return previous;
   if (live.every((it) => it.status === "served")) return "delivered";
   if (live.some((it) => it.status === "ready")) return "ready";
