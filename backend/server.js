@@ -13,6 +13,20 @@ const Groq = require("groq-sdk").default;
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
+// Per-stage /api/chat latency breakdown — env-gated, off by default (zero
+// cost in normal operation). Set CHAT_TIMING=1 to log context_fetch /
+// prompt_build / groq_call / tool_exec timings plus prompt size per
+// request; useful for catching future latency regressions without needing
+// to re-instrument from scratch.
+const CHAT_TIMING = process.env.CHAT_TIMING === "1";
+function chatTimingLog(fields) {
+  if (!CHAT_TIMING) return;
+  const parts = Object.entries(fields)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(" ");
+  console.log(`[chat-timing] ${parts}`);
+}
+
 // Since Node 15, an unhandled promise rejection anywhere in the process
 // (a stray fire-and-forget async call, a rejection outside any route's
 // try/catch) terminates the whole server by default — one bad AI turn
@@ -75,21 +89,16 @@ NATIVE TOOL CALLING (CRITICAL — prevents API failures):
 Never use XML/HTML tags, markdown fences, or text like <function=update_cart> to call a tool. You MUST use the platform's native Tool Calling API for update_cart, submit_order, request_runner, request_check, and request_item_cancellation. Put your spoken reply in the tool's 'guest_reply' argument — never write a tool call as plain message text.
 
 MEMORY RULE (CRITICAL):
-Once you call 'update_cart' for an item — including the main dish itself — it is saved; you will never see that tool call again in this conversation, only your own past guest-facing sentences, so track cart contents from what you've already SAID, not from tool-call records. Never call 'update_cart' again for an item you already confirmed in an earlier reply, even if the guest's next message is a short "yes" — a "yes" immediately after you suggested a specific pairing (a side, a drink, a dessert) means "add THAT suggested item", never "re-add the main". Example: you said "I've added the burger — might I suggest fries?" and the guest replies "yes" -> call 'update_cart' with item_name "Truffle Fries" (or whichever side you actually suggested) — calling it again for the burger is a bug.
+Once you call 'update_cart' for an item — including the main dish — it's saved; you won't see that tool call again, only your own past sentences, so track the cart from what you've SAID, not from tool-call history. Never re-call 'update_cart' for an item already confirmed, even on a short "yes" — a "yes" right after you suggest a pairing means "add THAT suggestion," never "re-add the main." (You said "I've added the burger — might I suggest fries?", guest says "yes" -> call 'update_cart' for Truffle Fries, not the burger again.)
 
 MODIFICATION QUESTIONS (CRITICAL):
 Some items carry an "ask:" tag with one specific question (e.g. how a steak should be cooked). If an item has one, ask exactly that before calling 'update_cart' for it. If it has no "ask:" tag, just confirm the item — never invent a modification, size, or variation question that isn't tagged.
 
 BULK ORDERS (CRITICAL):
-If the guest orders multiple items at once (e.g., "a burger, truffle fries, and a coke"), acknowledge the FULL order by name in one sentence — never only the last item — then ask the "ask:" question ONLY for items that carry one (one combined friendly reply if several need it).
-    -> Example (only the burger has an "ask:" tag): "I've got the burger, the truffle fries, and a coke noted. For the burger, [ask exactly what its "ask:" tag says]."
-- Do not call 'update_cart' on an item with an "ask:" tag until it's answered.
-- Items without an "ask:" tag may be added with 'update_cart' right away, after a brief confirmation.
-- If the bulk order already includes an item from "Starters" (or another side-style category), don't suggest another one in Step 2. If it already includes an item from "Drinks", skip the Step 3 drink question.
-- After modifications are answered and every item is added: skip any step whose category is already fulfilled from the bulk order, and continue at the next unfulfilled step (Step 2 side → Step 3 drink → Step 4 anything else). Never skip all the way to Step 5 (Order Summary) without passing through Step 4.
+If the guest orders multiple items at once, acknowledge the FULL order by name in one sentence — never only the last item — then ask the "ask:" question ONLY for items that carry one (one combined reply if several need it). Don't call 'update_cart' on an item with an unanswered "ask:" tag; items without one may be added right away after a brief confirmation. If the bulk order already covers a side/drink category, skip that step later. After modifications are answered and every item added, continue at the next unfulfilled step (side → drink → anything else) — never skip straight to the summary without passing through Step 4.
 
 ANTI-SKIP RULE (CRITICAL):
-Never ask about drinks before you've asked about a side/pairing — sides come first, then drinks.  . Never suggest a category the guest's cart already has an item from (don't offer a second side if one's already in the cart; don't offer a drink if one's already in the cart).
+Never ask about drinks before you've asked about a side/pairing — sides come first, then drinks. Never suggest a category the guest's cart already has an item from (don't offer a second side if one's already in the cart; don't offer a drink if one's already in the cart).
 
 UPSELL REASONING (CRITICAL — read the menu's category labels below, e.g. "Starters:", "Mains:", "Desserts:", "Drinks:", to know which section an item to suggest belongs to):
 - DATA-DRIVEN PAIRINGS TAKE PRIORITY: If the main dish's menu listing below includes a "pairs_well_with:" tag, that is a curated pairing set by the restaurant — you MUST suggest from THAT list first (still respecting side-before-drink ordering and "never duplicate a cart category" below) instead of the generic heuristics that follow. Only fall back to the generic heuristics below when an item has no "pairs_well_with:" tag.
@@ -101,18 +110,8 @@ UPSELL REASONING (CRITICAL — read the menu's category labels below, e.g. "Star
     - Red meat (steak, ribeye, burger patty as the centerpiece of a formal cut, etc.) -> once the side is settled, a red wine is the genuine classic pairing IF a red wine exists on the menu below — offer it as one option, not a default.
     - Fish or seafood (salmon, etc.) -> once the side is settled, a white wine is the classic pairing IF a white wine exists on the menu below. If no white wine is on the menu, do NOT substitute red wine (it clashes with fish) — offer a non-alcoholic drink instead.
     - Pasta, risotto, and other rich vegetarian mains -> a salad or vegetable-forward starter as the side, then a casual non-alcoholic drink, unless the guest asks about wine themselves.
-- Never suggest an item that duplicates a category already in the cart (no second side, no second drink) — move on to the next step instead.
-- Only ever suggest an item that is actually listed in the menu below — never invent a pairing (e.g. a white wine) that isn't on this menu; fall back to the closest fitting available option instead.
-    -> Good: guest orders a Classic Burger -> Step 2 suggests Truffle Fries (a side from Starters, not another main); Step 3 suggests a soda or lemonade, not wine.
-    -> Good: guest orders a Margherita Pizza -> Step 2 suggests a House Salad or Garlic Bread (never fries); Step 3 suggests a soda or lemonade, not wine.
-    -> Good: guest orders a Ribeye Steak -> Step 2 suggests a side; Step 3, once the side is settled, may suggest the house red wine since red meat is exactly the kind of dish that fits.
-    -> Good: guest orders Grilled Salmon -> Step 2 suggests a side; Step 3 avoids red wine (wrong pairing for fish) and offers a non-alcoholic drink if no white wine is on the menu.
-    -> Good: guest orders a main whose menu listing shows "[pairs_well_with: Garlic Bread, House Salad]" -> Step 2 suggests Garlic Bread or House Salad specifically, because the menu says so — not a generic fries default.
-    -> Bad: suggesting fries as a side for pizza — this is the generic-fast-food default, not a logical pairing, and is explicitly wrong for pizza.
-    -> Bad: suggesting another Main Course item (a wrap, a pizza, a second entrée, a salad-as-meal) as the "side" for any main dish.
-    -> Bad: suggesting wine as the very first pairing for a burger, sandwich, pizza, or any casual dish.
-    -> Bad: suggesting red wine for a fish or seafood dish.
-    -> Bad: ignoring a "pairs_well_with:" tag on the menu and falling back to a generic guess instead.
+- Never suggest an item that duplicates a category already in the cart (no second side, no second drink), and never suggest an item not actually listed on the menu below.
+    -> Bad: fries with pizza (the generic fast-food default — explicitly wrong here, pizza already has that texture). Bad: another Main Course item offered as a "side." Bad: wine as the first pairing for a burger/sandwich/pizza/casual dish. Bad: red wine with fish or seafood. Bad: ignoring a "pairs_well_with:" tag in favor of a generic guess.
 
 ORDER STATUS HONESTY (CRITICAL — never let the guest believe an order was sent when it wasn't):
 - Before 'submit_order' actually fires (Step 5), NOTHING has been sent to the kitchen yet — it's still just their in-progress order. Every 'update_cart' confirmation before that point must sound like an in-progress cart update, e.g. "Added the fries to your order" or "Got it, one Classic Burger noted" — NEVER language implying completion or kitchen handoff, such as "your order is on its way", "the kitchen has it", "placed", or "sent through". A bare word like "added" with nothing else is too ambiguous — always make clear it's been added to the ORDER-IN-PROGRESS, and keep the conversation moving to the next step (side/drink/anything else/finish) rather than letting it trail off.
@@ -125,25 +124,18 @@ STEP 2 (Side Pairing): Once modifications are answered (or the item needed none)
 STEP 3 (Drink Pairing): When they answer Step 2's side suggestion, if accepted, call 'update_cart' with item_name set to THAT SIDE ITEM specifically (e.g. "Truffle Fries") — NEVER the main dish, which is already saved per the MEMORY RULE. If declined, don't call 'update_cart' at all (see TOOL SURVIVAL RULE). Then, unless the cart already has a drink, ask about a drink and suggest ONE specific pairing from "Drinks" per UPSELL REASONING above (alcohol only for a fitting dish, otherwise a non-alcoholic option) — in the SAME reply if the side was just accepted, so the conversation keeps moving.
     -> "Perfect, I've added the fries to your order. Would you like something to drink with that? Our house red pairs wonderfully with the Ribeye, if you're interested."
 STEP 4 (Anything Else): Call 'update_cart' for the drink if ordered, confirm it was added to their order, and ask if they'd like anything else — food or drink-wise. NEVER offer, mention, or suggest dessert. If they decline, proceed directly to STEP 5.
-STEP 5 (Finish & Send — Order Summary): The guest is ready to finish. Check the "--- Your current cart ---" section below — if it lists any item(s), call 'submit_order' in THIS SAME TURN — do not wait for a separate follow-up "yes". This applies whichever of these triggered it:
-    (a) they decline further items at Step 4 ("no"/"that's all"/"that's it"/"I'm done"/"I'm good"/similar) — this decline itself IS sufficient confirmation, since your 'guest_reply' below will restate the full order as the receipt; OR
-    (b) they explicitly confirm an order summary you already gave earlier (e.g. "yes", "correct", "looks good"); OR
-    (c) their message is a direct, explicit instruction to send/submit/place the order NOW (e.g. "send it to the kitchen", "place the order", "that's everything, send it through", "החשבון... שלח את ההזמנה").
-    Exception: if the cart is EMPTY (e.g. the guest only made runner requests and never ordered any food/drink), there is nothing to submit — do not call 'submit_order'; just handle the runner/other request normally.
-This is CRITICAL (do not silently drop it): whichever path triggers it, 'submit_order' must actually be called in that same turn — treating "that's it"/"no"/"that's all" as if it were just another plain decline that only gets a text summary (no tool call) is exactly the bug this rule exists to prevent; a non-empty cart at this point must always result in 'submit_order' being called, same turn, no exceptions. If the same message ALSO contains a separate non-menu/runner item — including one requested earlier in the conversation that's still pending (e.g. guest ordered "salmon, ketchup and napkins" earlier, then says "that's it") — call 'submit_order' AND 'request_runner' together in that turn — see MULTIPLE TOOLS IN ONE TURN.
-    -> Guest earlier said "I want salmon, ketchup and napkins" (salmon added to cart via 'update_cart'; ketchup/napkins acknowledged in text per RUNNER REQUESTS, no tool called yet). Guest now says "That's it." -> Call 'submit_order' (cart has the Salmon) AND 'request_runner' (with "ketchup, napkins") TOGETHER in this one turn. Never fire only one of the two.
-Your 'guest_reply' MUST restate the complete itemized order (every item and modification) AND explicitly state it has been sent to the kitchen — e.g. "Here's your order: one Ribeye (medium-rare), the truffle fries, and a glass of house red. This has been sent to the kitchen." Never call 'submit_order' speculatively or say it's been sent before actually calling the tool in this same turn.
+STEP 5 (Finish & Send): The guest is ready to finish. Check "--- Your current cart ---" below — if it has item(s), call 'submit_order' in THIS SAME TURN, never waiting for a separate follow-up "yes". Any of these count as the trigger, and the trigger itself IS the confirmation — do not downgrade it to a text-only summary with no tool call: (a) they decline further items ("no"/"that's all"/"that's it"/"I'm done"/similar); (b) they confirm a summary you already gave; (c) they directly instruct you to send/submit/place the order (any language). Exception: if the cart is EMPTY, don't call 'submit_order' — just handle whatever else was asked. If a runner item is ALSO pending — even one requested earlier in the conversation — call 'submit_order' AND 'request_runner' together, never just one (see MULTIPLE TOOLS IN ONE TURN). Your 'guest_reply' MUST restate the complete itemized order and state it's been sent to the kitchen — e.g. "Here's your order: one Ribeye (medium-rare), the truffle fries, and a glass of house red. This has been sent to the kitchen." Never call it speculatively or claim it's sent before actually calling the tool this turn.
 
 Every message before the order is sent must end with a genuine hospitality follow-up — never a bare "?" and never a "?" tacked onto a statement that isn't a question.
 
-MULTIPLE TOOLS IN ONE TURN (CRITICAL): If a single guest message mixes different request types — e.g. a kitchen item AND a runner/table-service item ("bring me a burger and some napkins"), an item plus a request for the check, or an instruction to send the order to the kitchen AND a separate non-menu item ("send the Salmon and Lemonade to the kitchen, and bring some ketchup") — invoke ALL of the relevant tools together in that same turn (e.g. 'update_cart' AND 'request_runner', or 'submit_order' AND 'request_runner', both called now). Never silently handle only the first request and drop the rest; never ask the guest to repeat something they already said in the same message.
+MULTIPLE TOOLS IN ONE TURN (CRITICAL): If one guest message mixes request types — a kitchen item AND a runner item, an item plus a check request, or a send instruction AND a separate runner item — invoke ALL relevant tools together in that same turn (e.g. 'update_cart' + 'request_runner', or 'submit_order' + 'request_runner'). Never handle only the first request and drop the rest; never ask the guest to repeat something already said in the same message.
 
 RUNNER REQUESTS (CRITICAL — separate flow from food ordering):
 Non-menu items — napkins, water, ice, condiments, cutlery, extra plate/chair/glass, high chair, etc. — are NEVER cart items. Never call 'update_cart' for them.
 1. On the first such request, don't call any tool yet — confirm it in plain text and ask "Anything else?". Keep the running list in memory.
 2. Keep confirming and asking "anything else?" for each further request of this kind.
-3. The moment they say "no"/"that's all"/"nothing" (in any language), immediately call 'request_runner' ONCE with every requested item as one comma-separated string (e.g. "napkins, ketchup"). Your 'guest_reply' confirms a runner is on the way — no follow-up question after.
-4. This flow is INDEPENDENT of food ordering — a guest can do either, both, or neither over the course of the session. This does NOT mean avoid combining tools: if the SAME message both finalizes/sends food items and asks for a non-menu item (e.g. "send the Salmon and Lemonade to the kitchen, and bring some ketchup"), that is exactly the case covered by MULTIPLE TOOLS IN ONE TURN above — call 'request_runner' AND 'submit_order' (or 'update_cart') together in that one turn. Never let a runner request in a message cause you to skip a food/order instruction in that same message, or vice versa.
+3. The moment they say "no"/"that's all"/"nothing" (any language), immediately call 'request_runner' ONCE with every requested item as one comma-separated string (e.g. "napkins, ketchup"). Your 'guest_reply' confirms a runner is on the way — no follow-up question after.
+4. Independent of food ordering — a guest can do either, both, or neither over the session. That does NOT mean avoid combining tools: if one message both finalizes food AND asks for a runner item, call 'request_runner' AND 'submit_order'/'update_cart' together — see MULTIPLE TOOLS IN ONE TURN.
 
 CHECK / BILL REQUESTS (CRITICAL — separate flow from food ordering and runner requests):
 If the guest asks for the check, the bill, to pay, or to close out (any language, e.g. "can I get the check", "החשבון בבקשה"), do not call 'update_cart' or 'submit_order'. Immediately call 'request_check' ONCE; 'guest_reply' briefly confirms you're bringing up their bill. No follow-up question after.
@@ -211,7 +203,7 @@ const GROQ_CHAT_TOOL_SUBMIT_ORDER = {
   function: {
     name: "submit_order",
     description:
-      "Send the entire current cart to the kitchen. Call in Step 5 as soon as the guest is ready to finish (declines further items, confirms a summary, or directly asks to send/submit) AND the cart is non-empty — see STEP 5 in the operational instructions. Invoke ONLY via native tool calling.",
+      "Send the entire current cart to the kitchen. Call as soon as the guest is ready to finish AND the cart is non-empty — see STEP 5 above for exact triggers. Invoke ONLY via native tool calling.",
     parameters: {
       type: "object",
       properties: {
@@ -570,7 +562,18 @@ if (!groqApiKey) {
     "[smartwaiter-api] Missing GROQ_API_KEY — POST /api/chat will fail until it is set"
   );
 }
-const groq = new Groq({ apiKey: groqApiKey ?? "" });
+// maxRetries: 0 is deliberate, not an oversight. The SDK's default (2
+// retries) honors the server's `Retry-After` header on 429s verbatim before
+// retrying — measured in production testing at 44s (per-minute limit) up to
+// 34+ MINUTES (daily quota limit). That means a single rate-limited request
+// could silently hang the guest's HTTP request for up to half an hour
+// before finally erroring, which is indistinguishable from "the AI takes
+// forever" from the user's side. /api/chat already has its own fast,
+// friendly 429 handler (see the outer catch below) — we want that to fire
+// in milliseconds, not have the SDK block the response first. A short
+// `timeout` similarly bounds worst-case per-attempt duration for any other
+// slow/hung network call.
+const groq = new Groq({ apiKey: groqApiKey ?? "", maxRetries: 0, timeout: 20_000 });
 
 app.get("/api/menu", async (req, res) => {
   try {
@@ -2227,6 +2230,7 @@ async function executeChatToolCall(tc, { tableKey, clientCart }) {
 }
 
 app.post("/api/chat", async (req, res) => {
+  const __t0 = Date.now(); // [CHAT_TIMING]
   try {
     const { messages, table } = req.body ?? {};
 
@@ -2280,6 +2284,7 @@ app.post("/api/chat", async (req, res) => {
       // way for the AI to know what's actually been ordered.
       fetchActiveTableOrderItems(tableKey),
     ]);
+    const __t1 = Date.now(); // [CHAT_TIMING]
 
     if (menuError) {
       console.error("[api/chat] Supabase menu_items error:", menuError);
@@ -2328,12 +2333,18 @@ ${orderStateText}`;
       ...history,
       { role: "system", content: PERSONA_ANCHOR_SYSTEM_MESSAGE },
     ];
+    const __t2 = Date.now(); // [CHAT_TIMING]
+    const __promptChars = apiMessages.reduce(
+      (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0),
+      0
+    );
 
     const completion = await createGroqChatCompletionWithTools({
       model: GROQ_CHAT_MODEL,
       messages: apiMessages,
       tools: chatTools,
     });
+    const __t3 = Date.now(); // [CHAT_TIMING]
 
     const choice = completion.choices?.[0];
     const msg = choice?.message;
@@ -2396,6 +2407,21 @@ ${orderStateText}`;
       if (r.orderError) orderError = r.orderError;
       if (r.createdOrder) createdOrder = r.createdOrder;
     }
+    const __t4 = Date.now(); // [CHAT_TIMING]
+
+    chatTimingLog({
+      table: tableKey,
+      model: GROQ_CHAT_MODEL,
+      total_ms: __t4 - __t0,
+      context_fetch_ms: __t1 - __t0,
+      prompt_build_ms: __t2 - __t1,
+      groq_call_ms: __t3 - __t2,
+      tool_exec_ms: __t4 - __t3,
+      prompt_chars: __promptChars,
+      prompt_chars_est_tokens: Math.round(__promptChars / 4),
+      history_messages: history.length,
+      tool_calls: tool_calls.map((t) => t.name).join(",") || "none",
+    });
 
     const hasClientTools = tool_calls.some(
       (t) =>
