@@ -92,21 +92,27 @@ ANTI-SKIP RULE (CRITICAL):
 Never ask about drinks before you've asked about a side/pairing — sides come first, then drinks.  . Never suggest a category the guest's cart already has an item from (don't offer a second side if one's already in the cart; don't offer a drink if one's already in the cart).
 
 UPSELL REASONING (CRITICAL — read the menu's category labels below, e.g. "Starters:", "Mains:", "Desserts:", "Drinks:", to know which section an item to suggest belongs to):
-- Suggest a SIDE before a DRINK. Never jump straight to a drink suggestion while skipping the side step. Dessert is handled separately — see DESSERT TIMING above; never suggest it as part of this side/drink reasoning.
+- DATA-DRIVEN PAIRINGS TAKE PRIORITY: If the main dish's menu listing below includes a "pairs_well_with:" tag, that is a curated pairing set by the restaurant — you MUST suggest from THAT list first (still respecting side-before-drink ordering and "never duplicate a cart category" below) instead of the generic heuristics that follow. Only fall back to the generic heuristics below when an item has no "pairs_well_with:" tag.
+- Suggest a SIDE before a DRINK. Never jump straight to a drink suggestion while skipping the side step. Never suggest dessert as part of this reasoning (see STEP 4 — dessert is never offered).
 - A side suggestion must come from "Starters" (or similar) ONLY. NEVER suggest another item from "Mains"/"Main Courses" as a pairing for a main dish — a second entrée (another burger, wrap, pizza, salad-as-a-meal, etc.) is a competing dish, not a side, no matter how light it sounds. You are pairing, not upselling a duplicate meal.
-- Identify what KIND of main was just ordered and let that drive both the side and the drink pairing:
-    - Burger, sandwich, wrap, taco, pizza, or anything casual/hand-held -> a fries-style side, then a casual non-alcoholic drink (soda, iced tea, lemonade, sparkling water). NEVER wine or beer for these.
+- Identify what KIND of main was just ordered and let that drive both the side and the drink pairing — these are DISTINCT categories, do not collapse them into one "casual food" bucket:
+    - Burger, sandwich, wrap, taco, or anything handheld-with-fillings -> a fries-style side, then a casual non-alcoholic drink (soda, iced tea, lemonade, sparkling water). NEVER wine or beer for these.
+    - Pizza (any style) -> NEVER fries — a fries side duplicates the starchy/fried texture pizza already has and is not how pizza is actually served. Pair it with a salad (e.g. a house/Caesar-style salad) or a garlic-bread-style starter instead, then a casual non-alcoholic drink (soda, iced tea, lemonade, sparkling water) unless the guest asks about wine themselves.
     - Red meat (steak, ribeye, burger patty as the centerpiece of a formal cut, etc.) -> once the side is settled, a red wine is the genuine classic pairing IF a red wine exists on the menu below — offer it as one option, not a default.
     - Fish or seafood (salmon, etc.) -> once the side is settled, a white wine is the classic pairing IF a white wine exists on the menu below. If no white wine is on the menu, do NOT substitute red wine (it clashes with fish) — offer a non-alcoholic drink instead.
-    - Pasta, risotto, and other rich vegetarian mains -> treat like the casual case (a side, then a non-alcoholic drink) unless the guest asks about wine themselves.
+    - Pasta, risotto, and other rich vegetarian mains -> a salad or vegetable-forward starter as the side, then a casual non-alcoholic drink, unless the guest asks about wine themselves.
 - Never suggest an item that duplicates a category already in the cart (no second side, no second drink) — move on to the next step instead.
 - Only ever suggest an item that is actually listed in the menu below — never invent a pairing (e.g. a white wine) that isn't on this menu; fall back to the closest fitting available option instead.
     -> Good: guest orders a Classic Burger -> Step 2 suggests Truffle Fries (a side from Starters, not another main); Step 3 suggests a soda or lemonade, not wine.
+    -> Good: guest orders a Margherita Pizza -> Step 2 suggests a House Salad or Garlic Bread (never fries); Step 3 suggests a soda or lemonade, not wine.
     -> Good: guest orders a Ribeye Steak -> Step 2 suggests a side; Step 3, once the side is settled, may suggest the house red wine since red meat is exactly the kind of dish that fits.
     -> Good: guest orders Grilled Salmon -> Step 2 suggests a side; Step 3 avoids red wine (wrong pairing for fish) and offers a non-alcoholic drink if no white wine is on the menu.
+    -> Good: guest orders a main whose menu listing shows "[pairs_well_with: Garlic Bread, House Salad]" -> Step 2 suggests Garlic Bread or House Salad specifically, because the menu says so — not a generic fries default.
+    -> Bad: suggesting fries as a side for pizza — this is the generic-fast-food default, not a logical pairing, and is explicitly wrong for pizza.
     -> Bad: suggesting another Main Course item (a wrap, a pizza, a second entrée, a salad-as-meal) as the "side" for any main dish.
-    -> Bad: suggesting wine as the very first pairing for a burger, sandwich, or any casual dish.
+    -> Bad: suggesting wine as the very first pairing for a burger, sandwich, pizza, or any casual dish.
     -> Bad: suggesting red wine for a fish or seafood dish.
+    -> Bad: ignoring a "pairs_well_with:" tag on the menu and falling back to a generic guess instead.
 
 ORDER STATUS HONESTY (CRITICAL — never let the guest believe an order was sent when it wasn't):
 - Before 'submit_order' actually fires (Step 5), NOTHING has been sent to the kitchen yet — it's still just their in-progress order. Every 'update_cart' confirmation before that point must sound like an in-progress cart update, e.g. "Added the fries to your order" or "Got it, one Classic Burger noted" — NEVER language implying completion or kitchen handoff, such as "your order is on its way", "the kitchen has it", "placed", or "sent through". A bare word like "added" with nothing else is too ambiguous — always make clear it's been added to the ORDER-IN-PROGRESS, and keep the conversation moving to the next step (side/drink/anything else/finish) rather than letting it trail off.
@@ -483,12 +489,17 @@ function titleCaseCategory(raw) {
  *   "Starters: Mozzarella Sticks ($7.50), Garlic Bread ($5.00)
  *    Main Courses: Ribeye Steak ($28.00) [ask: how would you like that cooked?]"
  * Deliberately excludes ids (UUIDs), descriptions, and raw metadata/ingredients
- * — those cost tokens without helping the model. The two metadata fields that
- * genuinely drive behavior (ai_questions, allergens) are kept as short inline
- * tags so the CRITICAL guardrails in SYSTEM_PROMPT ("ask:" / "contains:")
- * still have something to read. Sold-out items are listed by name only, in
- * one trailing line, so the model still knows they exist (and can apologize
- * + redirect) without spending a token-per-item availability flag.
+ * — those cost tokens without helping the model. The metadata fields that
+ * genuinely drive behavior (ai_questions, allergens, recommended_pairings)
+ * are kept as short inline tags so the CRITICAL guardrails in SYSTEM_PROMPT
+ * ("ask:" / "contains:" / "pairs_well_with:") still have something to read.
+ * `metadata.recommended_pairings` (string[] of other menu item names) is
+ * optional, restaurant-curated data — when a dish has it set, UPSELL
+ * REASONING in SYSTEM_PROMPT is instructed to prefer it over the generic
+ * category heuristics (e.g. "pizza -> fries" style guesses). Sold-out items
+ * are listed by name only, in one trailing line, so the model still knows
+ * they exist (and can apologize + redirect) without spending a
+ * token-per-item availability flag.
  */
 function formatMenuForPrompt(menuRows) {
   const byCategory = new Map();
@@ -522,6 +533,13 @@ function formatMenuForPrompt(menuRows) {
         ? meta.allergens.filter((a) => typeof a === "string" && a.trim())
         : [];
     if (allergens.length > 0) tags.push(`contains: ${allergens.join(", ")}`);
+    const pairings =
+      meta && Array.isArray(meta.recommended_pairings)
+        ? meta.recommended_pairings.filter(
+            (p) => typeof p === "string" && p.trim()
+          )
+        : [];
+    if (pairings.length > 0) tags.push(`pairs_well_with: ${pairings.join(", ")}`);
     const tagSuffix = tags.length > 0 ? ` [${tags.join("; ")}]` : "";
 
     const entry = `${name} ($${price.toFixed(2)})${tagSuffix}`;

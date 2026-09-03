@@ -14,6 +14,14 @@ export type MenuItemMetadata = {
   ingredients?: string[];
   /** e.g. "Ask how they want the burger cooked (rare/med/well) and if they want onions." */
   ai_questions?: string;
+  /**
+   * Curated upsell pairings for this dish, by exact menu item name (e.g.
+   * ["House Salad", "Garlic Bread"] for a pizza). When set, the AI waiter
+   * prefers these over its generic category-based pairing heuristics — see
+   * "pairs_well_with:" in backend/server.js's formatMenuForPrompt and the
+   * UPSELL REASONING section of SYSTEM_PROMPT.
+   */
+  recommended_pairings?: string[];
 } & Record<string, unknown>;
 
 /** Table: menu_items */
