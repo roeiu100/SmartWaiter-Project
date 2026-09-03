@@ -13,6 +13,18 @@ const Groq = require("groq-sdk").default;
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
+// Since Node 15, an unhandled promise rejection anywhere in the process
+// (a stray fire-and-forget async call, a rejection outside any route's
+// try/catch) terminates the whole server by default — one bad AI turn
+// should never take down every table's session. Log and keep serving
+// instead of crashing.
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", reason?.stack ?? reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err?.stack ?? err);
+});
+
 /** Set after `new Server(...)` — used from HTTP handlers to push realtime events. */
 let io;
 
@@ -107,18 +119,24 @@ STEP 2 (Side Pairing): Once modifications are answered (or the item needed none)
 STEP 3 (Drink Pairing): When they answer Step 2's side suggestion, if accepted, call 'update_cart' with item_name set to THAT SIDE ITEM specifically (e.g. "Truffle Fries") — NEVER the main dish, which is already saved per the MEMORY RULE. If declined, don't call 'update_cart' at all (see TOOL SURVIVAL RULE). Then, unless the cart already has a drink, ask about a drink and suggest ONE specific pairing from "Drinks" per UPSELL REASONING above (alcohol only for a fitting dish, otherwise a non-alcoholic option) — in the SAME reply if the side was just accepted, so the conversation keeps moving.
     -> "Perfect, I've added the fries to your order. Would you like something to drink with that? Our house red pairs wonderfully with the Ribeye, if you're interested."
 STEP 4 (Anything Else): Call 'update_cart' for the drink if ordered, confirm it was added to their order, and ask if they'd like anything else — food or drink-wise. NEVER offer, mention, or suggest dessert. If they decline, proceed directly to STEP 5.
-STEP 5 (Order Summary): Once they're done, summarize the FULL order so far (every item, with modifications) conversationally and ask them to confirm. Do NOT call 'submit_order' in this step, and do not imply it's been sent yet.
+STEP 5 (Order Summary): Once they're done (they decline further items — "no"/"that's all"/similar, WITHOUT also explicitly instructing you to send/submit), summarize the FULL order so far (every item, with modifications) conversationally and ask them to confirm. Do NOT call 'submit_order' in this step, and do not imply it's been sent yet.
     -> "Just to confirm: one Ribeye, medium-rare, with the house red and the truffle fries. Shall I send that through?"
-STEP 6 (Submit): Only after explicit confirmation of the Step 5 summary (e.g. "yes", "correct", "looks good"), call 'submit_order'. Your 'guest_reply' MUST restate the complete itemized order (every item and modification) AND explicitly state it has been sent to the kitchen — e.g. "Here's your order: one Ribeye (medium-rare), the truffle fries, and a glass of house red. This has been sent to the kitchen." Never call 'submit_order' speculatively or say it's been sent before actually calling the tool in this same turn.
+STEP 6 (Submit): Call 'submit_order' the moment EITHER of these happens — do not stall on it:
+    (a) explicit confirmation of a Step 5 summary you already gave (e.g. "yes", "correct", "looks good"); OR
+    (b) the guest's message itself is a direct, explicit instruction to send/submit/place the order NOW (e.g. "send it to the kitchen", "place the order", "that's everything, send it through", "החשבון... שלח את ההזמנה") — even if you never showed a separate Step 5 recap first. A direct send instruction like this IS the confirmation; do not reply with a summary-and-wait-for-yes round trip when the guest already told you to send it — call 'submit_order' immediately, in this same turn.
+This is CRITICAL (do not silently drop it): whichever path triggers it, 'submit_order' must actually be called in that same turn — treating a direct "send it" as if it were just another "anything else?" decline (i.e. only replying with a summary and no tool call) is a bug. If the same message ALSO contains a separate non-menu/runner item (e.g. "send the Salmon and Lemonade to the kitchen, and bring some ketchup"), call 'submit_order' AND 'request_runner' together in that turn — see MULTIPLE TOOLS IN ONE TURN.
+Your 'guest_reply' MUST restate the complete itemized order (every item and modification) AND explicitly state it has been sent to the kitchen — e.g. "Here's your order: one Ribeye (medium-rare), the truffle fries, and a glass of house red. This has been sent to the kitchen." Never call 'submit_order' speculatively or say it's been sent before actually calling the tool in this same turn.
 
 Every message before the order is sent must end with a genuine hospitality follow-up — never a bare "?" and never a "?" tacked onto a statement that isn't a question.
+
+MULTIPLE TOOLS IN ONE TURN (CRITICAL): If a single guest message mixes different request types — e.g. a kitchen item AND a runner/table-service item ("bring me a burger and some napkins"), an item plus a request for the check, or an instruction to send the order to the kitchen AND a separate non-menu item ("send the Salmon and Lemonade to the kitchen, and bring some ketchup") — invoke ALL of the relevant tools together in that same turn (e.g. 'update_cart' AND 'request_runner', or 'submit_order' AND 'request_runner', both called now). Never silently handle only the first request and drop the rest; never ask the guest to repeat something they already said in the same message.
 
 RUNNER REQUESTS (CRITICAL — separate flow from food ordering):
 Non-menu items — napkins, water, ice, condiments, cutlery, extra plate/chair/glass, high chair, etc. — are NEVER cart items. Never call 'update_cart' for them.
 1. On the first such request, don't call any tool yet — confirm it in plain text and ask "Anything else?". Keep the running list in memory.
 2. Keep confirming and asking "anything else?" for each further request of this kind.
 3. The moment they say "no"/"that's all"/"nothing" (in any language), immediately call 'request_runner' ONCE with every requested item as one comma-separated string (e.g. "napkins, ketchup"). Your 'guest_reply' confirms a runner is on the way — no follow-up question after.
-4. Never mix this with 'update_cart'/'submit_order' — a guest can do either, both, or neither in the same session.
+4. This flow is INDEPENDENT of food ordering — a guest can do either, both, or neither over the course of the session. This does NOT mean avoid combining tools: if the SAME message both finalizes/sends food items and asks for a non-menu item (e.g. "send the Salmon and Lemonade to the kitchen, and bring some ketchup"), that is exactly the case covered by MULTIPLE TOOLS IN ONE TURN above — call 'request_runner' AND 'submit_order' (or 'update_cart') together in that one turn. Never let a runner request in a message cause you to skip a food/order instruction in that same message, or vice versa.
 
 CHECK / BILL REQUESTS (CRITICAL — separate flow from food ordering and runner requests):
 If the guest asks for the check, the bill, to pay, or to close out (any language, e.g. "can I get the check", "החשבון בבקשה"), do not call 'update_cart' or 'submit_order'. Immediately call 'request_check' ONCE; 'guest_reply' briefly confirms you're bringing up their bill. No follow-up question after.
@@ -324,7 +342,12 @@ async function createGroqChatCompletionWithTools({
     messages,
     tools,
     tool_choice: "auto",
-    parallel_tool_calls: false,
+    // CRITICAL: must stay true. A guest can ask for a kitchen item AND a
+    // runner item (or several tools at once) in one message — the server
+    // already loops over the full tool_calls array (see /api/chat below),
+    // but with this false, Groq caps the model to a single tool call per
+    // turn, silently dropping every request after the first.
+    parallel_tool_calls: true,
   };
 
   try {
@@ -1117,86 +1140,104 @@ async function createOrderFromCart(payload) {
     return { error: { status: 400, message: "Cart has no valid items" } };
   }
 
-  // Fetch authoritative prices + availability server-side so clients can't
-  // forge totals.
-  const ids = [...new Set(cleanedLines.map((l) => l.menu_item_id))];
-  const { data: menuRows, error: menuErr } = await supabase
-    .from("menu_items")
-    .select("id, name, price, is_available")
-    .in("id", ids);
-  if (menuErr) {
-    console.error("[createOrderFromCart] menu lookup error", menuErr);
-    return { error: { status: 500, message: menuErr.message } };
-  }
-  const menuById = new Map((menuRows ?? []).map((m) => [m.id, m]));
+  // Everything past this point hits Supabase. A thrown exception here
+  // (network blip, client-library error that isn't surfaced as `.error`)
+  // must not escape as an unhandled rejection — wrap it and hand the caller
+  // the same `{ error }` shape as every other failure branch below.
+  try {
+    // Fetch authoritative prices + availability server-side so clients can't
+    // forge totals.
+    const ids = [...new Set(cleanedLines.map((l) => l.menu_item_id))];
+    const { data: menuRows, error: menuErr } = await supabase
+      .from("menu_items")
+      .select("id, name, price, is_available")
+      .in("id", ids);
+    if (menuErr) {
+      console.error("[createOrderFromCart] menu lookup error", menuErr);
+      return { error: { status: 500, message: menuErr.message } };
+    }
+    const menuById = new Map((menuRows ?? []).map((m) => [m.id, m]));
 
-  const linesWithPrice = [];
-  let total = 0;
-  for (const line of cleanedLines) {
-    const m = menuById.get(line.menu_item_id);
-    if (!m || m.is_available === false) continue;
-    const unit_price = Number(m.price ?? 0);
-    total += unit_price * line.quantity;
-    linesWithPrice.push({ ...line, unit_price });
-  }
-  if (linesWithPrice.length === 0) {
+    const linesWithPrice = [];
+    let total = 0;
+    for (const line of cleanedLines) {
+      const m = menuById.get(line.menu_item_id);
+      if (!m || m.is_available === false) continue;
+      const unit_price = Number(m.price ?? 0);
+      total += unit_price * line.quantity;
+      linesWithPrice.push({ ...line, unit_price });
+    }
+    if (linesWithPrice.length === 0) {
+      return {
+        error: {
+          status: 400,
+          message: "No available items in the cart to send to the kitchen",
+        },
+      };
+    }
+
+    const nowIso = new Date().toISOString();
+    const { data: orderInsert, error: orderErr } = await supabase
+      .from("orders")
+      .insert({
+        table_id,
+        status: "submitted",
+        total_price: Math.round(total * 100) / 100,
+        created_at: nowIso,
+        submitted_at: nowIso,
+      })
+      .select("id")
+      .single();
+    if (orderErr || !orderInsert?.id) {
+      console.error("[createOrderFromCart] insert order error", orderErr);
+      return {
+        error: {
+          status: 500,
+          message: orderErr?.message ?? "Could not create order",
+        },
+      };
+    }
+
+    const orderId = orderInsert.id;
+    const itemsPayload = linesWithPrice.map((l) => ({
+      order_id: orderId,
+      menu_item_id: l.menu_item_id,
+      quantity: l.quantity,
+      unit_price: l.unit_price,
+      status: "pending",
+      notes: l.notes,
+    }));
+    const { error: itemsErr } = await supabase
+      .from("order_items")
+      .insert(itemsPayload);
+    if (itemsErr) {
+      console.error("[createOrderFromCart] insert items error", itemsErr);
+      // Clean up the orphan order so a retry doesn't accumulate empties.
+      try {
+        await supabase.from("orders").delete().eq("id", orderId);
+      } catch (cleanupErr) {
+        console.error(
+          "[createOrderFromCart] orphan order cleanup failed",
+          cleanupErr
+        );
+      }
+      return { error: { status: 500, message: itemsErr.message } };
+    }
+
+    const { data: full, error: loadErr } = await loadFullOrder(orderId);
+    if (loadErr) {
+      console.error("[createOrderFromCart] load full error", loadErr);
+      return { error: { status: 500, message: loadErr.message } };
+    }
+
+    if (io) io.emit("order_created", full);
+    return { order: full };
+  } catch (err) {
+    console.error("[createOrderFromCart] threw:", err?.message ?? err);
     return {
-      error: {
-        status: 400,
-        message: "No available items in the cart to send to the kitchen",
-      },
+      error: { status: 500, message: err?.message ?? "Could not create order" },
     };
   }
-
-  const nowIso = new Date().toISOString();
-  const { data: orderInsert, error: orderErr } = await supabase
-    .from("orders")
-    .insert({
-      table_id,
-      status: "submitted",
-      total_price: Math.round(total * 100) / 100,
-      created_at: nowIso,
-      submitted_at: nowIso,
-    })
-    .select("id")
-    .single();
-  if (orderErr || !orderInsert?.id) {
-    console.error("[createOrderFromCart] insert order error", orderErr);
-    return {
-      error: {
-        status: 500,
-        message: orderErr?.message ?? "Could not create order",
-      },
-    };
-  }
-
-  const orderId = orderInsert.id;
-  const itemsPayload = linesWithPrice.map((l) => ({
-    order_id: orderId,
-    menu_item_id: l.menu_item_id,
-    quantity: l.quantity,
-    unit_price: l.unit_price,
-    status: "pending",
-    notes: l.notes,
-  }));
-  const { error: itemsErr } = await supabase
-    .from("order_items")
-    .insert(itemsPayload);
-  if (itemsErr) {
-    console.error("[createOrderFromCart] insert items error", itemsErr);
-    // Clean up the orphan order so a retry doesn't accumulate empties.
-    await supabase.from("orders").delete().eq("id", orderId);
-    return { error: { status: 500, message: itemsErr.message } };
-  }
-
-  const { data: full, error: loadErr } = await loadFullOrder(orderId);
-  if (loadErr) {
-    console.error("[createOrderFromCart] load full error", loadErr);
-    return { error: { status: 500, message: loadErr.message } };
-  }
-
-  if (io) io.emit("order_created", full);
-  return { order: full };
 }
 
 app.post("/api/orders", async (req, res) => {
@@ -1674,36 +1715,47 @@ async function fetchActiveTableOrderItems(tableId) {
   const table = (tableId ?? "").toString().trim();
   if (!table) return { items: [] };
 
-  const { data: orders, error } = await supabase
-    .from("orders")
-    .select(
-      `id, table_id, created_at,
-       order_items:order_items (
-         id, order_id, menu_item_id, quantity, unit_price, status, cancellation_status,
-         menu_items:menu_items ( id, name )
-       )`
-    )
-    .eq("table_id", table)
-    .is("paid_at", null)
-    .order("created_at", { ascending: true });
-  if (error) return { error };
+  try {
+    const { data: orders, error } = await supabase
+      .from("orders")
+      .select(
+        `id, table_id, created_at,
+         order_items:order_items (
+           id, order_id, menu_item_id, quantity, unit_price, status, cancellation_status,
+           menu_items:menu_items ( id, name )
+         )`
+      )
+      .eq("table_id", table)
+      .is("paid_at", null)
+      .order("created_at", { ascending: true });
+    if (error) return { items: [], error };
 
-  const items = [];
-  for (const order of orders ?? []) {
-    for (const it of order.order_items ?? []) {
-      items.push({
-        orderId: order.id,
-        itemId: it.id,
-        menuItemId: it.menu_item_id,
-        name: it.menu_items?.name ?? "",
-        quantity: it.quantity,
-        unitPrice: Number(it.unit_price ?? 0),
-        status: it.status,
-        cancellationStatus: it.cancellation_status ?? "none",
-      });
+    const items = [];
+    for (const order of orders ?? []) {
+      for (const it of order.order_items ?? []) {
+        items.push({
+          orderId: order.id,
+          itemId: it.id,
+          menuItemId: it.menu_item_id,
+          name: it.menu_items?.name ?? "",
+          quantity: it.quantity,
+          unitPrice: Number(it.unit_price ?? 0),
+          status: it.status,
+          cancellationStatus: it.cancellation_status ?? "none",
+        });
+      }
     }
+    return { items };
+  } catch (err) {
+    // Network blip / Supabase client throw (not just an `.error` field) —
+    // fail soft with an empty order list rather than letting this bubble up
+    // and abort the whole /api/chat turn.
+    console.warn(
+      "[fetchActiveTableOrderItems] threw:",
+      err?.message ?? err
+    );
+    return { items: [], error: err };
   }
-  return { items };
 }
 
 /**
@@ -2064,6 +2116,97 @@ app.get("/api/analytics/prep-times", async (req, res) => {
   }
 });
 
+/**
+ * Executes the server-side effect of a single AI tool call from /api/chat
+ * (runner alert, cancellation request, or kitchen order submission).
+ *
+ * CRITICAL: the caller MUST run this over every entry in `tool_calls` via
+ * `Promise.all` (not just tool_calls[0], and not sequentially) — a guest
+ * turn frequently mixes multiple tools at once (e.g. "send the Salmon and
+ * Lemonade to the kitchen and bring some ketchup" = submit_order AND
+ * request_runner together). Handling only the first call, or awaiting them
+ * one-by-one such that an early failure short-circuits the rest, is exactly
+ * the bug this function exists to prevent. Each call is independently
+ * try/caught so one hallucinated/malformed call can't take down the others.
+ */
+async function executeChatToolCall(tc, { tableKey, clientCart }) {
+  const name = tc?.name;
+  try {
+    switch (name) {
+      case "request_runner": {
+        const args = tc.arguments ?? {};
+        const request =
+          typeof args.request === "string" ? args.request.trim() : "";
+        if (!request) return { name };
+        const alert = {
+          id: Date.now(),
+          table: tableKey,
+          request,
+          time: new Date().toISOString(),
+        };
+        activeRunnerAlerts.push(alert);
+        console.log("[api/chat] AI request_runner -> new_runner_alert", alert);
+        if (io) io.emit("new_runner_alert", alert);
+        return { name, alert };
+      }
+
+      case "request_item_cancellation": {
+        const args = tc.arguments ?? {};
+        const itemName =
+          typeof args.item_name === "string" ? args.item_name.trim() : "";
+        const reason =
+          typeof args.reason === "string" ? args.reason.trim() : "";
+        if (!itemName) return { name };
+        const result = await requestItemCancellationByName({
+          tableId: tableKey,
+          itemName,
+          reason,
+        });
+        if (result.error) {
+          console.warn(
+            "[api/chat] request_item_cancellation failed:",
+            result.error.message ?? result.error
+          );
+        } else {
+          console.log("[api/chat] AI request_item_cancellation ->", result);
+        }
+        return { name, result };
+      }
+
+      case "submit_order": {
+        // The cart is client-authoritative (see createOrderFromCart doc
+        // comment below) — the client sends it on every /api/chat call.
+        if (clientCart.length === 0) {
+          return {
+            name,
+            orderError: {
+              status: 400,
+              message: "submit_order was requested but no cart was provided",
+            },
+          };
+        }
+        const result = await createOrderFromCart({
+          table_id: tableKey,
+          items: clientCart,
+        });
+        if (result.error) return { name, orderError: result.error };
+        return { name, createdOrder: result.order };
+      }
+
+      default:
+        // update_cart / request_check / anything else: purely client-side,
+        // nothing to dispatch server-side.
+        return { name };
+    }
+  } catch (err) {
+    console.error(
+      `[api/chat] tool call "${name}" threw:`,
+      err?.message ?? err
+    );
+    return { name, error: err };
+  }
+}
+
 app.post("/api/chat", async (req, res) => {
   try {
     const { messages, table } = req.body ?? {};
@@ -2077,9 +2220,17 @@ app.post("/api/chat", async (req, res) => {
     const tableKey =
       typeof table === "string" && table.trim() !== "" ? table.trim() : "T?";
 
+    // Cap how much prior chat gets replayed to Groq on every turn. Order
+    // state and cart are re-fetched fresh each request (see
+    // ORDER STATE IS AUTHORITATIVE in SYSTEM_PROMPT) and don't depend on
+    // this history, so trimming old turns is safe — it just bounds the
+    // prompt token count (and therefore Groq latency) from growing
+    // unbounded over a long session instead of staying roughly flat.
+    const MAX_HISTORY_MESSAGES = 24;
     const history = messages
       .filter((m) => m && typeof m === "object")
       .filter((m) => m.role === "user" || m.role === "assistant")
+      .slice(-MAX_HISTORY_MESSAGES)
       .map((m) => ({
         role: m.role,
         content:
@@ -2090,8 +2241,26 @@ app.post("/api/chat", async (req, res) => {
               : JSON.stringify(m.content),
       }));
 
-    const { data: menuRows, error: menuError } =
-      await fetchMenuItemsWithRetry();
+    // These three reads are fully independent of one another (menu catalog,
+    // runner-service options, and this table's live order) — fetch them
+    // concurrently instead of sequentially so total wait time is the slowest
+    // single call, not the sum of all three. This is on the hot path of
+    // every chat turn, so shaving redundant round-trips matters directly for
+    // Groq-speed latency.
+    const [
+      { data: menuRows, error: menuError },
+      runnerOptions,
+      { items: currentOrderItems, error: orderStateError },
+    ] = await Promise.all([
+      fetchMenuItemsWithRetry(),
+      fetchRunnerOptions(),
+      // Fetched fresh on every single turn — deliberately NOT derived from
+      // `history`/`messages`, which resets whenever the guest starts a new
+      // chat session (e.g. reopening the app). The order itself lives in
+      // Postgres regardless of chat session, so this is the only reliable
+      // way for the AI to know what's actually been ordered.
+      fetchActiveTableOrderItems(tableKey),
+    ]);
 
     if (menuError) {
       console.error("[api/chat] Supabase menu_items error:", menuError);
@@ -2102,15 +2271,6 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    const runnerOptions = await fetchRunnerOptions();
-
-    // Fetched fresh on every single turn — deliberately NOT derived from
-    // `history`/`messages`, which resets whenever the guest starts a new
-    // chat session (e.g. reopening the app). The order itself lives in
-    // Postgres regardless of chat session, so this is the only reliable way
-    // for the AI to know what's actually been ordered.
-    const { items: currentOrderItems, error: orderStateError } =
-      await fetchActiveTableOrderItems(tableKey);
     if (orderStateError) {
       console.warn(
         "[api/chat] fetchActiveTableOrderItems error:",
@@ -2196,78 +2356,26 @@ ${orderStateText}`;
       };
     });
 
-    // Server-side tools (AI dispatches runner on behalf of the guest).
-    // We still return the tool_call to the client so its `guest_reply` can
-    // show in the chat bubble, but the side effect (emitting a runner
-    // alert) is handled here so the Runner tablet sees it immediately.
-    for (const tc of tool_calls) {
-      if (tc.name !== "request_runner") continue;
-      const args = (tc.arguments ?? {});
-      const request =
-        typeof args.request === "string" ? args.request.trim() : "";
-      if (!request) continue;
-      const alert = {
-        id: Date.now(),
-        table: tableKey,
-        request,
-        time: new Date().toISOString(),
-      };
-      activeRunnerAlerts.push(alert);
-      console.log("[api/chat] AI request_runner -> new_runner_alert", alert);
-      if (io) io.emit("new_runner_alert", alert);
-    }
+    // Server-side tool dispatch. We still return the FULL tool_calls array
+    // to the client so its `guest_reply`(s) can show in the chat bubble and
+    // `update_cart`/`request_check` can run client-side, but any tool with a
+    // server-side effect (runner alert, cancellation request, kitchen order
+    // submission) is executed here, concurrently, over every entry in
+    // `tool_calls` — never just the first one, and never sequentially in a
+    // way where one call's outcome blocks another's. This is what makes a
+    // single guest turn like "send the Salmon and Lemonade to the kitchen
+    // and bring some ketchup" (submit_order + request_runner together)
+    // actually dispatch both instead of silently dropping one.
+    const toolResults = await Promise.all(
+      tool_calls.map((tc) => executeChatToolCall(tc, { tableKey, clientCart }))
+    );
 
-    // Server-side tool: the AI files a cancellation request against an
-    // already-submitted order line. This never cancels anything itself —
-    // it only sets cancellation_status='requested' for a manager to review.
-    for (const tc of tool_calls) {
-      if (tc.name !== "request_item_cancellation") continue;
-      const args = tc.arguments ?? {};
-      const itemName =
-        typeof args.item_name === "string" ? args.item_name.trim() : "";
-      const reason = typeof args.reason === "string" ? args.reason.trim() : "";
-      if (!itemName) continue;
-      const result = await requestItemCancellationByName({
-        tableId: tableKey,
-        itemName,
-        reason,
-      });
-      if (result.error) {
-        console.warn(
-          "[api/chat] request_item_cancellation failed:",
-          result.error.message ?? result.error
-        );
-      } else {
-        console.log("[api/chat] AI request_item_cancellation ->", result);
-      }
-    }
-
-    // submit_order: the AI tells us to ship the cart. The cart is held on
-    // the client (authoritative), so we expect the client to have sent the
-    // current cart in a parallel /api/orders call (GuestMenu flow) OR, for
-    // the chat flow, we accept a `cart` field on the /api/chat request and
-    // persist from that. This keeps the server the single writer of the
-    // orders table while letting the Chat UI drive it.
     let createdOrder = null;
     let orderError = null;
-    const hasSubmitOrder = tool_calls.some((t) => t.name === "submit_order");
-    if (hasSubmitOrder) {
-      if (clientCart.length === 0) {
-        orderError = {
-          status: 400,
-          message: "submit_order was requested but no cart was provided",
-        };
-      } else {
-        const result = await createOrderFromCart({
-          table_id: tableKey,
-          items: clientCart,
-        });
-        if (result.error) {
-          orderError = result.error;
-        } else {
-          createdOrder = result.order;
-        }
-      }
+    for (const r of toolResults) {
+      if (r.name !== "submit_order") continue;
+      if (r.orderError) orderError = r.orderError;
+      if (r.createdOrder) createdOrder = r.createdOrder;
     }
 
     const hasClientTools = tool_calls.some(
