@@ -108,6 +108,10 @@ STEP 5 (Finish & Send): Check "--- Your current cart ---" below — if non-empty
     -> Example: earlier the guest asked for ketchup/napkins (only acknowledged in text, not yet dispatched) and also has a main dish in the cart; now they say "that's it" — call BOTH 'submit_order' (cart is non-empty) AND 'request_runner' (ketchup, napkins) in this one turn. Firing only 'request_runner' here and leaving the cart unsent is exactly the bug this note exists to prevent.
 'guest_reply' MUST restate the complete itemized order and state it's been sent — e.g. "Here's your order: one Ribeye (medium-rare) and truffle fries. This has been sent to the kitchen." Never claim it's sent before actually calling the tool.
 
+NO REPEATED CONFIRMATIONS (CRITICAL): Once you've said "Added <item>" for something, that's said — never say it again in a later reply, and never re-call 'update_cart' for it (see the cart section below, which always shows the current, already-added state). If the guest's reply doesn't introduce a new item, don't restate an old confirmation as filler — always move the conversation forward instead: continue the 6-step flow (next unresolved step), or, if the cart is non-empty and they've now given you a second signal that they're done (declining again, "good"/"that's it" after already declining once, or anything covered by STEP 5's confirmation list), that means STOP ASKING AND FINALIZE — call 'submit_order' THIS TURN rather than asking "anything else?" yet again. Never let the guest re-decline the same "anything else?" question more than once without calling 'submit_order' if the cart is non-empty.
+    -> Bad: guest says "no" to a side/drink offer, cart already has the main -> replying "Added the Ribeye to your order" again (already said, nothing changed) instead of moving to the next step or, if this is their second decline in a row, finalizing.
+    -> Bad: asking "anything else?" three times in a row while the guest keeps declining, without ever calling 'submit_order'.
+
 Every message before the order is sent ends with a genuine hospitality follow-up — never a bare "?" tacked onto a non-question.
 
 MULTIPLE TOOLS IN ONE TURN (CRITICAL): One guest message mixing request types -> invoke ALL relevant tools together, never just the first one: kitchen item + runner item -> 'update_cart' + 'request_runner'. A decline/send instruction ("that's it"/"send it") with a runner item pending from earlier in the conversation -> 'submit_order' + 'request_runner' BOTH, even though the runner item wasn't mentioned in this exact message. Item + check request -> the relevant cart tool + 'request_check'. Never handle only the first request and drop the rest.
@@ -149,7 +153,8 @@ const GROQ_CHAT_TOOL_UPDATE_CART = {
         },
         quantity: {
           type: "number",
-          description: "How many to add. Use 0 only to remove an item already on the cart.",
+          description:
+            "The item's NEW TOTAL quantity on the cart, not how many more to add — e.g. if 1 is already in the cart (see the cart section below) and the guest orders one more, pass 2, not 1. Never call this again with the SAME total that's already shown in the cart section; that's a no-op re-confirmation, not a new add. Use 0 only to remove an item already on the cart.",
         },
         special_requests: {
           type: "string",
@@ -1813,6 +1818,83 @@ function formatCartForPrompt(cartLines, menuRows) {
 }
 
 /**
+ * Resolves an `update_cart`/`submit_order`-adjacent item_name string back to
+ * a real menu_item id, mirroring `resolveMenuItemId` in the frontend's
+ * ChatScreen.tsx (exact match first, then a loose substring match for minor
+ * paraphrasing) — needed server-side by the duplicate-add guard below, which
+ * has to compare the model's item_name against the client's cart (keyed by
+ * menu_item_id, not by name).
+ */
+function resolveMenuItemIdByName(menuRows, itemName) {
+  const target = (itemName ?? "").toString().trim().toLowerCase();
+  if (!target) return null;
+  const rows = Array.isArray(menuRows) ? menuRows : [];
+  const exact = rows.find((m) => (m.name ?? "").trim().toLowerCase() === target);
+  if (exact) return exact.id;
+  const loose = rows.find((m) => {
+    const n = (m.name ?? "").trim().toLowerCase();
+    return n && (n.includes(target) || target.includes(n));
+  });
+  return loose ? loose.id : null;
+}
+
+/**
+ * Guest reply text that means "no more items, I'm done" — mirrors
+ * `userDeclinesFurtherItems` in the frontend's ChatScreen.tsx. Duplicated
+ * (not imported) because the backend is a separate Node process/deploy from
+ * the RN app; used by the STEP 5 finalization backstop in /api/chat (see
+ * doc comment there) to detect when the model should have called
+ * 'submit_order' but didn't.
+ */
+function isDeclineFurtherItemsPhrase(text) {
+  const raw = (text ?? "").toString().trim();
+  if (!raw) return false;
+  const t = raw.toLowerCase();
+  if (
+    /^(no|nope|no thanks|no thank you|nothing else|that'?s all|that is all|all set|i'?m good|we'?re good)\.?$/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  if (/^לא(\s+תודה)?\.?$/i.test(raw)) return true;
+  if (/^(זהו|סיימתי)\.?$/i.test(raw)) return true;
+  return false;
+}
+
+/**
+ * Builds a deterministic, itemized "sent to the kitchen" guest_reply for the
+ * STEP 5 finalization backstop (see /api/chat) — used only when the backstop
+ * itself calls createOrderFromCart because the model failed to call
+ * 'submit_order' on its own, so there is no model-authored guest_reply to
+ * fall back on. Mirrors the phrasing the SYSTEM_PROMPT requires from the
+ * model's own 'submit_order' guest_reply ("Here's your order: ...This has
+ * been sent to the kitchen.") so the guest sees a consistent message
+ * regardless of which path actually finalized the order.
+ */
+function buildForcedFinalizeGuestReply(clientCart, menuRows, lang) {
+  const menuById = new Map((menuRows ?? []).map((m) => [m.id, m]));
+  const parts = (Array.isArray(clientCart) ? clientCart : [])
+    .map((l) => {
+      const qty = Number(l?.quantity ?? 0);
+      if (!Number.isFinite(qty) || qty <= 0) return null;
+      const name = menuById.get(l?.menu_item_id)?.name;
+      if (!name) return null;
+      return qty === 1 ? name : `${qty}x ${name}`;
+    })
+    .filter(Boolean);
+  const itemsText = parts.join(", ");
+  if (lang === "he") {
+    return itemsText
+      ? `הנה ההזמנה שלכם: ${itemsText}. ההזמנה נשלחה למטבח.`
+      : "ההזמנה נשלחה למטבח.";
+  }
+  return itemsText
+    ? `Here's your order: ${itemsText}. This has been sent to the kitchen.`
+    : "This has been sent to the kitchen.";
+}
+
+/**
  * Used by the AI waiter's `request_item_cancellation` tool call — it only
  * knows a table id and a dish name, not an order/item id, so this resolves
  * the most recently-placed, still-active (non-canceled, not already
@@ -2308,6 +2390,19 @@ app.post("/api/chat", async (req, res) => {
     // having to infer cart contents from its own past sentences.
     const clientCart = Array.isArray(req.body?.cart) ? req.body.cart : [];
     const cartStateText = formatCartForPrompt(clientCart, menuRows);
+    const cartIsNonEmpty =
+      cartStateText !== "Nothing has been added to the cart yet this session.";
+
+    // Used below by both the duplicate-add guard and the STEP 5 finalization
+    // backstop — resolved once here from the raw (untrimmed) `messages`
+    // array so both checks see the guest's actual latest wording, not just
+    // the capped `history` slice.
+    const latestUserMessage = [...messages]
+      .reverse()
+      .find((m) => m && typeof m === "object" && m.role === "user");
+    const latestUserText =
+      typeof latestUserMessage?.content === "string" ? latestUserMessage.content : "";
+    const latestUserLang = /[\u0590-\u05FF]/.test(latestUserText) ? "he" : "en";
 
     const compactMenu = formatMenuForPrompt(menuRows);
 
@@ -2333,7 +2428,7 @@ ${compactMenu}
 --- Your current cart (already added via update_cart this session — NOT yet sent to the kitchen) ---
 ${cartStateText}
 This is the DEFINITIVE record of what's already in the cart. NEVER call 'update_cart' again for an item listed here — if the guest just accepted a suggestion (a side, a drink, a dessert), call 'update_cart' for THAT newly-accepted item, which will NOT be listed here yet, not for anything already shown above.
-NEVER RE-LITIGATE A RESOLVED STEP (CRITICAL): The conversation history above is just as authoritative as this list for what you've already SAID and already asked. If you already told the guest "I've added <item>" or already made a suggestion earlier in this conversation, do not say it again or re-ask it — even if this cart list looks incomplete or empty, that is a display lag, not permission to restart the order. Always reply as a continuation of the conversation so far, picking up exactly where the last message left off (e.g. moving on to the next step, or answering their latest message) — never repeat an earlier reply verbatim or re-introduce an item you already confirmed.
+NEVER RE-LITIGATE A RESOLVED STEP (CRITICAL): The conversation history above is just as authoritative as this list for what you've already SAID and already asked. If you already told the guest "I've added <item>" or already made a suggestion earlier in this conversation, do not say it again or re-ask it — even if this cart list looks incomplete or empty, that is a display lag, not permission to restart the order. Always reply as a continuation of the conversation so far, picking up exactly where the last message left off (e.g. moving on to the next step, or answering their latest message) — never repeat an earlier reply verbatim or re-introduce an item you already confirmed. If the guest's latest message doesn't add anything new (e.g. a plain "no"/"good"/"that's it") and the cart above is non-empty, that message is very likely the finalization signal from STEP 5/NO REPEATED CONFIRMATIONS — call 'submit_order' now instead of producing another "Added <item>" or "anything else?" reply.
 
 --- Runner requests already sent to the Runner dashboard for this table this session (DEFINITIVE — fetched fresh, not your memory) ---
 ${runnerAlertsText}
@@ -2425,6 +2520,63 @@ ${orderStateText}`;
       };
     });
 
+    // DUPLICATE ADD-CONFIRMATION GUARD: despite MEMORY RULE / NEVER
+    // RE-LITIGATE / NO REPEATED CONFIRMATIONS in the prompt above, this
+    // model has been observed re-calling 'update_cart' for an item that's
+    // already in the client's cart at the exact same quantity — a
+    // functional no-op (the client applies update_cart as an absolute "set
+    // total to", see setGuestCartLine in frontend/src/simulator/
+    // simulatorStore.ts, so this never actually double-charges the guest),
+    // but it still re-narrates "Added <item> to your order" verbatim, which
+    // reads to the guest as if something is being re-added and stalls the
+    // conversation instead of moving to the next step. Detected here against
+    // the client's authoritative cart (not the model's own past prose) and
+    // rewritten into a forward-moving nudge — we rewrite rather than drop
+    // the tool call so a turn where this was the model's ONLY tool call
+    // still has a visible reply instead of falling through to the client's
+    // generic "I didn't quite catch that" fallback.
+    const existingCartLineByMenuId = new Map(
+      clientCart
+        .filter((l) => typeof l?.menu_item_id === "string")
+        .map((l) => [
+          l.menu_item_id,
+          {
+            quantity: Number(l?.quantity ?? 0),
+            notes: typeof l?.notes === "string" ? l.notes.trim() : "",
+          },
+        ])
+    );
+    for (const tc of tool_calls) {
+      if (tc.name !== "update_cart") continue;
+      const args = tc.arguments ?? {};
+      const itemName = typeof args.item_name === "string" ? args.item_name : "";
+      const qty = Number(args.quantity);
+      if (!itemName || !Number.isFinite(qty) || qty <= 0) continue;
+      const menuId = resolveMenuItemIdByName(menuRows, itemName);
+      if (!menuId) continue;
+      const existing = existingCartLineByMenuId.get(menuId);
+      if (!existing || existing.quantity !== qty) continue;
+      // Also require special_requests to be unchanged — same quantity but a
+      // new/changed modifier (e.g. "no tomato" added after the fact) is a
+      // real update, not a no-op re-confirmation. No special_requests field
+      // at all means "keep whatever notes are already there" (matches
+      // setGuestCartLine in simulatorStore.ts), so that case never counts
+      // as a change.
+      const requestedNotes =
+        typeof args.special_requests === "string" ? args.special_requests.trim() : existing.notes;
+      if (requestedNotes !== existing.notes) continue;
+      console.log(
+        `[api/chat] update_cart no-op duplicate suppressed for table ${tableKey}: "${itemName}" already at qty ${qty}`
+      );
+      tc.arguments = {
+        ...args,
+        guest_reply:
+          latestUserLang === "he"
+            ? "זה כבר בהזמנה שלכם — משהו נוסף, או שאשלח את ההזמנה למטבח?"
+            : "That's already on your order — anything else, or shall I send this to the kitchen?",
+      };
+    }
+
     // Server-side tool dispatch. We still return the FULL tool_calls array
     // to the client so its `guest_reply`(s) can show in the chat bubble and
     // `update_cart`/`request_check` can run client-side, but any tool with a
@@ -2445,6 +2597,71 @@ ${orderStateText}`;
       if (r.name !== "submit_order") continue;
       if (r.orderError) orderError = r.orderError;
       if (r.createdOrder) createdOrder = r.createdOrder;
+    }
+
+    // STEP 5 FINALIZATION BACKSTOP: the model is instructed (STEP 5 /
+    // NO REPEATED CONFIRMATIONS / MULTIPLE TOOLS IN ONE TURN above) to call
+    // 'submit_order' the moment the guest declines further items with a
+    // non-empty cart, but live testing showed it doesn't reliably do so —
+    // sometimes it just re-asks "anything else?" indefinitely, sometimes it
+    // fires 'request_runner' alone (its own signal that it judged the guest
+    // "done") and leaves the cart unsent. Either failure means the guest's
+    // food never reaches the kitchen with no error shown to them at all —
+    // worse than a premature submit, which at most sends real, already-
+    // agreed-upon cart contents a turn early. So: if the model did NOT call
+    // 'submit_order' this turn, the cart is genuinely non-empty, the guest's
+    // latest message is a plain decline ("no"/"that's all"/etc, no new
+    // item), and this is at least the SECOND signal that they're done —
+    // either they've already declined once before in this conversation, or
+    // the model itself just fired 'request_runner' (which only fires on a
+    // "no more" signal, see RUNNER REQUESTS above) — then finalize for real
+    // here: actually call createOrderFromCart (never fabricate a "sent"
+    // claim), and only synthesize a submit_order tool_call/guest_reply for
+    // the client to show if that call genuinely succeeded. Once it
+    // succeeds, the client clears its cart (see ChatScreen.tsx), so
+    // `cartIsNonEmpty` is false on every later turn — this can't re-fire for
+    // the same order.
+    if (!createdOrder && !orderError && cartIsNonEmpty) {
+      const submitOrderCalledThisTurn = tool_calls.some((t) => t.name === "submit_order");
+      if (!submitOrderCalledThisTurn && isDeclineFurtherItemsPhrase(latestUserText)) {
+        const runnerCalledThisTurn = tool_calls.some((t) => t.name === "request_runner");
+        const priorDeclineSeen = messages.some(
+          (m) =>
+            m &&
+            typeof m === "object" &&
+            m.role === "user" &&
+            m !== latestUserMessage &&
+            isDeclineFurtherItemsPhrase(typeof m.content === "string" ? m.content : "")
+        );
+        if (runnerCalledThisTurn || priorDeclineSeen) {
+          const forced = await createOrderFromCart({ table_id: tableKey, items: clientCart });
+          if (forced.order) {
+            createdOrder = forced.order;
+            tool_calls.push({
+              id: `forced_submit_${Date.now()}`,
+              name: "submit_order",
+              arguments: {
+                guest_reply: buildForcedFinalizeGuestReply(clientCart, menuRows, latestUserLang),
+              },
+            });
+            console.log(
+              `[api/chat] STEP 5 finalization backstop: model omitted submit_order, forced it for table ${tableKey}`
+            );
+          } else if (forced.error) {
+            // Don't surface this as `orderError` here — no submit_order
+            // tool_call is being added to `tool_calls` on this failure path,
+            // so the client's `hadSubmitOrder` check stays false and it
+            // won't show a "there was an error sending your order" message
+            // it never actually promised. Just log for observability; the
+            // model gets another chance to call 'submit_order' itself (or
+            // this backstop retries) on the guest's next message.
+            console.warn(
+              "[api/chat] STEP 5 finalization backstop attempted submit_order but it failed:",
+              forced.error
+            );
+          }
+        }
+      }
     }
     const __t4 = Date.now(); // [CHAT_TIMING]
 
