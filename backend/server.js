@@ -311,6 +311,16 @@ async function createGroqChatCompletionWithTools({
     // turn, silently dropping every request after the first.
     parallel_tool_calls: true,
   };
+  // NOTE: gpt-oss models expose a reasoning_effort param that measurably
+  // cuts hidden reasoning-token spend (verified live: 120 -> 23 reasoning
+  // tokens with "low" on a trivial test). Deliberately NOT enabled here —
+  // live testing against the actual production system prompt showed
+  // reasoning_effort:"low" causes real instruction-following regressions
+  // (a STEP 1 violation calling update_cart with a nonsensical quantity: 0
+  // before the required "ask:" question was answered, and a separate trial
+  // that returned neither text nor a tool call at all) on 2 of 3 identical
+  // trials. The token savings are real but not worth the reliability cost
+  // for this app's correctness-critical tool-calling flow.
 
   try {
     return await groq.chat.completions.create(payload);
