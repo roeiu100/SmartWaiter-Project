@@ -112,7 +112,7 @@ Every message before the order is sent ends with a genuine hospitality follow-up
 
 MULTIPLE TOOLS IN ONE TURN (CRITICAL): One guest message mixing request types -> invoke ALL relevant tools together, never just the first one: kitchen item + runner item -> 'update_cart' + 'request_runner'. A decline/send instruction ("that's it"/"send it") with a runner item pending from earlier in the conversation -> 'submit_order' + 'request_runner' BOTH, even though the runner item wasn't mentioned in this exact message. Item + check request -> the relevant cart tool + 'request_check'. Never handle only the first request and drop the rest.
 
-RUNNER REQUESTS (CRITICAL — separate from food ordering): Non-menu items (napkins, water, ice, condiments, cutlery, extra plate/chair/glass, etc.) are NEVER cart items — never 'update_cart' for them. 1) First such request: confirm in plain text, ask "Anything else?", no tool yet. 2) Keep confirming further requests the same way. 3) On "no"/"that's all"/"nothing" (any language), call 'request_runner' ONCE with every item as one comma-separated string. 4) Independent of food ordering, but combine tools when one message covers both (see MULTIPLE TOOLS IN ONE TURN).
+RUNNER REQUESTS (CRITICAL — separate from food ordering): Non-menu items (napkins, water, ice, condiments, cutlery, extra plate/chair/glass, etc.) are NEVER cart items — never 'update_cart' for them. 1) First such request: confirm in plain text, ask "Anything else?", no tool yet. 2) Keep confirming further requests the same way. 3) On "no"/"that's all"/"nothing" (any language), call 'request_runner' ONCE with every item NOT already listed in "--- Runner requests already sent ---" below, as one comma-separated string. 4) Independent of food ordering, but combine tools when one message covers both (see MULTIPLE TOOLS IN ONE TURN). Before EVER calling 'request_runner', check "--- Runner requests already sent ---" — if the item(s) are already there, do NOT call the tool again and do NOT re-confirm "it's on the way"; that's already handled, just continue the conversation.
 
 CHECK / BILL REQUESTS (CRITICAL): Guest asks for the check/bill/to pay (any language) -> don't call 'update_cart'/'submit_order'; call 'request_check' ONCE, brief confirmation.
 
@@ -2133,6 +2133,25 @@ async function executeChatToolCall(tc, { tableKey, clientCart }) {
         const request =
           typeof args.request === "string" ? args.request.trim() : "";
         if (!request) return { name };
+        // Hard backstop against duplicate dispatches: the system prompt
+        // shows the model what's already been sent (see the "Runner
+        // requests already sent" section in /api/chat), but that's a
+        // best-effort instruction, not a guarantee — this model has been
+        // observed re-calling a tool for something already handled several
+        // turns back. An identical, still-active request for the same
+        // table must never create a second real alert regardless of why
+        // the model called it again.
+        const alreadyActive = activeRunnerAlerts.some(
+          (a) =>
+            a.table === tableKey &&
+            a.request.trim().toLowerCase() === request.toLowerCase()
+        );
+        if (alreadyActive) {
+          console.log(
+            `[api/chat] request_runner suppressed duplicate for table ${tableKey}: "${request}" already active`
+          );
+          return { name, duplicate: true };
+        }
         const alert = {
           id: Date.now(),
           table: tableKey,
@@ -2291,6 +2310,19 @@ app.post("/api/chat", async (req, res) => {
     const cartStateText = formatCartForPrompt(clientCart, menuRows);
 
     const compactMenu = formatMenuForPrompt(menuRows);
+
+    // Structured, server-tracked ground truth for what's already been sent
+    // to the Runner dashboard this session — mirrors how the cart/order
+    // sections work below. Without this, the model has to recall from raw
+    // conversation prose whether it already called 'request_runner', which
+    // is exactly what caused it to re-call the tool (and re-narrate "on the
+    // way") on later, unrelated turns.
+    const tableRunnerAlerts = activeRunnerAlerts.filter((a) => a.table === tableKey);
+    const runnerAlertsText =
+      tableRunnerAlerts.length > 0
+        ? tableRunnerAlerts.map((a) => `- ${a.request}`).join("\n")
+        : "Nothing sent yet.";
+
     const systemContent = `${SYSTEM_PROMPT}
 
 The following table service items are currently available: ${runnerOptions}. If the guest asks for a runner/table-service item that is NOT in this list, apologise and tell them it is not available — never silently substitute or invent.
@@ -2302,6 +2334,10 @@ ${compactMenu}
 ${cartStateText}
 This is the DEFINITIVE record of what's already in the cart. NEVER call 'update_cart' again for an item listed here — if the guest just accepted a suggestion (a side, a drink, a dessert), call 'update_cart' for THAT newly-accepted item, which will NOT be listed here yet, not for anything already shown above.
 NEVER RE-LITIGATE A RESOLVED STEP (CRITICAL): The conversation history above is just as authoritative as this list for what you've already SAID and already asked. If you already told the guest "I've added <item>" or already made a suggestion earlier in this conversation, do not say it again or re-ask it — even if this cart list looks incomplete or empty, that is a display lag, not permission to restart the order. Always reply as a continuation of the conversation so far, picking up exactly where the last message left off (e.g. moving on to the next step, or answering their latest message) — never repeat an earlier reply verbatim or re-introduce an item you already confirmed.
+
+--- Runner requests already sent to the Runner dashboard for this table this session (DEFINITIVE — fetched fresh, not your memory) ---
+${runnerAlertsText}
+NEVER call 'request_runner' again for anything already listed here — it is already dispatched, calling it again sends a duplicate real notification to kitchen staff. NEVER keep repeating "on the way"/"napkins are coming" confirmations for these in later replies either — say it ONCE when you first dispatch it, then move the conversation forward (e.g. "anything else?") instead of re-stating already-handled items.
 
 --- Already ordered for this table (fetched fresh just now — this is the CURRENT, AUTHORITATIVE record; it is NOT the same thing as what you remember from earlier in this conversation, and it stays accurate even if this is a brand-new chat session) ---
 ${orderStateText}`;
