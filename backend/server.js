@@ -101,7 +101,7 @@ ORDER STATUS HONESTY (CRITICAL): Before 'submit_order' fires (Step 5), nothing h
 
 STRICT 6-STEP ORDER FLOW:
 STEP 1 (Modifications): Ask any "ask:" question for an ordered item, worded exactly as tagged. No tag = just confirm. Don't call 'update_cart' until it's answered.
-STEP 2 (Side Pairing): Once modifications are answered (or none needed), call 'update_cart' for the main. Unless the cart already has a side, suggest ONE specific side from "Starters" per UPSELL REASONING — your 'guest_reply' confirms the add AND makes that suggestion. -> "Wonderful, I've added the Ribeye. Might I suggest our truffle fries alongside it?"
+STEP 2 (Side Pairing): Once modifications are answered (or none needed), call 'update_cart' for the main. Unless the cart already has a side, suggest ONE specific side from "Starters" per UPSELL REASONING — your 'guest_reply' confirms the add AND makes that suggestion. -> "Wonderful, I've added the Ribeye. Might I suggest our truffle fries alongside it?" If the SAME guest message also mentioned a runner item for the first time (napkins, water, etc.), this 'guest_reply' MUST also include its plain-text acknowledgment per RUNNER REQUESTS — see COMPLETE REPLIES FOR MULTI-PART MESSAGES below. -> "Wonderful, I've added the Ribeye. I've noted napkins for you. Might I suggest our truffle fries alongside it?"
 STEP 3 (Drink Pairing): If they accept Step 2's side, call 'update_cart' for THAT SIDE (never the main again, per MEMORY RULE); if declined, don't call 'update_cart' (see TOOL SURVIVAL RULE). Unless the cart already has a drink, ask about one and suggest ONE pairing from "Drinks" per UPSELL REASONING — same reply if the side was just accepted.
 STEP 4 (Anything Else): Call 'update_cart' for the drink if ordered, confirm it, ask if they'd like anything else. NEVER mention dessert. Decline -> go straight to STEP 5.
 STEP 5 (Finish & Send): Check "--- Your current cart ---" below — if non-empty, call 'submit_order' in THIS SAME TURN, no waiting for a second "yes". Any of these IS the confirmation: (a) they decline further items ("no"/"that's all"/"that's it"/similar); (b) they confirm a summary you gave; (c) they directly instruct you to send/submit (any language). Empty cart -> don't call it, just handle whatever else was asked. Before calling 'submit_order', re-scan this ENTIRE conversation (not just the latest message) for any runner/table-service request that hasn't been dispatched yet — if you find one, you MUST call 'submit_order' AND 'request_runner' together in this same turn, never 'request_runner' alone with the cart left unsent.
@@ -116,7 +116,12 @@ NO REPEATED CONFIRMATIONS (CRITICAL): Once you've said "Added <item>" for someth
 
 Every message before the order is sent ends with a genuine hospitality follow-up — never a bare "?" tacked onto a non-question.
 
-MULTIPLE TOOLS IN ONE TURN (CRITICAL): One guest message mixing request types -> invoke ALL relevant tools together, never just the first one: kitchen item + runner item -> 'update_cart' + 'request_runner'. A decline/send instruction ("that's it"/"send it") with a runner item pending from earlier in the conversation -> 'submit_order' + 'request_runner' BOTH, even though the runner item wasn't mentioned in this exact message. Item + check request -> the relevant cart tool + 'request_check'. Never handle only the first request and drop the rest.
+MULTIPLE TOOLS IN ONE TURN (CRITICAL): One guest message mixing request types -> invoke ALL relevant tools together, never just the first one. This does NOT mean 'request_runner' fires on a brand-new runner item's first mention (see RUNNER REQUESTS step 1 — that's still text-only) — it applies once the runner item is actually eligible for dispatch: a decline/send instruction ("that's it"/"send it") with a runner item pending from earlier in the conversation -> 'submit_order' + 'request_runner' BOTH, even though the runner item wasn't mentioned in this exact message. Item + check request -> the relevant cart tool + 'request_check'. Never handle only the first request and drop the rest.
+
+COMPLETE REPLIES FOR MULTI-PART MESSAGES (CRITICAL): If the guest's message contains more than one distinct ask — a food item AND a runner request, a food item AND a question, etc. — your ONE reply this turn MUST address EVERY part of it. This is about the WORDS in your reply, completely independent of whatever tools you do or don't call this turn: whether you call 'update_cart' (STEP 2), ask a plain-text modifier question with no tool call yet (STEP 1), or anything else, that same reply's words must still cover every other part of the guest's message too (e.g. a runner item's plain-text acknowledgment). Never send a reply that covers only one part and stops, leaving the guest to prompt you again (e.g. saying "And") just to get the rest acknowledged — that is a broken reply, not a valid turn.
+    -> Bad: guest says "I want pizza and napkins" -> replying "Added the Margherita Pizza to your order." and stopping there, with no mention of napkins at all until the guest says "And" or otherwise re-raises it. The napkin request was already in the SAME message; it must be acknowledged in this SAME reply.
+    -> Good: "Added the Margherita Pizza to your order. I've noted napkins for you. Might I suggest our Caesar Salad alongside it?" — one reply, every part of the guest's message addressed.
+    -> Good (no tool call yet, per STEP 1's "ask:" question): guest says "I want a burger and extra napkins" -> "How would you like the burger cooked — rare, medium, or well? I've noted extra napkins for you." — the modifier question AND the runner acknowledgment together, in plain text, before 'update_cart' ever fires.
 
 RUNNER REQUESTS (CRITICAL — separate from food ordering): Non-menu items (napkins, water, ice, condiments, cutlery, extra plate/chair/glass, etc.) are NEVER cart items — never 'update_cart' for them. 1) First such request: confirm in plain text, ask "Anything else?", no tool yet. 2) Keep confirming further requests the same way. 3) On "no"/"that's all"/"nothing" (any language), call 'request_runner' ONCE with every item NOT already listed in "--- Runner requests already sent ---" below, as one comma-separated string. 4) Independent of food ordering, but combine tools when one message covers both (see MULTIPLE TOOLS IN ONE TURN). Before EVER calling 'request_runner', check "--- Runner requests already sent ---" — if the item(s) are already there, do NOT call the tool again and do NOT re-confirm "it's on the way"; that's already handled, just continue the conversation.
 A runner item you only acknowledged in TEXT (e.g. "I've noted napkins for you") is NOT dispatched — saying it is not the same as calling the tool, and staff never see it until 'request_runner' actually fires. Whenever the guest's message is a decline/done signal (step 3 above) OR you're calling 'submit_order' this same turn, that is ALWAYS also your cue to check for any such not-yet-dispatched runner item and call 'request_runner' for it right then — never let a turn's reply be only about food (or only 'submit_order') while a runner item mentioned earlier still hasn't gotten its own tool call.
@@ -2578,7 +2583,7 @@ ${orderStateText}`;
 
     const choice = completion.choices?.[0];
     const msg = choice?.message;
-    const text =
+    let text =
       typeof msg?.content === "string" && msg.content.length > 0
         ? msg.content
         : null;
@@ -2868,6 +2873,40 @@ ${orderStateText}`;
     // this turn (organically or via the STEP 5 backstop just above). A
     // no-op if the first call point already dispatched it.
     await maybeForceRunnerDispatch(tool_calls.some((t) => t.name === "submit_order"));
+
+    // EMPTY TURN BACKSTOP: a rare Groq failure mode where the model returns
+    // neither usable text nor a real tool call — either the whole completion
+    // is empty (no content, no tool_calls), or it calls 'update_cart' with a
+    // blank item_name AND a blank guest_reply, which is a pure no-op (a real
+    // removal call always has a real item_name; only this garbage shape has
+    // both fields blank) that would otherwise leave the guest staring at an
+    // empty chat bubble. Live-measured at roughly 7% specifically on a food
+    // item carrying an "ask:" modifier combined with a runner request in the
+    // same message (e.g. "burger and extra napkins", where STEP 1 says not
+    // to call 'update_cart' yet, so the correct turn is plain text with no
+    // tool call at all — that's the shape this Groq/model quirk seems to hit
+    // most). Strip any such vacuous call, and if nothing meaningful is left
+    // this turn, substitute a generic "didn't catch that" prompt in the
+    // guest's language rather than showing them nothing at all.
+    for (let i = tool_calls.length - 1; i >= 0; i--) {
+      const tc = tool_calls[i];
+      if (
+        tc.name === "update_cart" &&
+        !(tc.arguments?.item_name ?? "").toString().trim() &&
+        !(tc.arguments?.guest_reply ?? "").toString().trim()
+      ) {
+        tool_calls.splice(i, 1);
+      }
+    }
+    if (tool_calls.length === 0 && (!text || !text.trim())) {
+      text =
+        latestUserLang === "he"
+          ? "סליחה, לא הבנתי לגמרי. תוכלו לומר את זה שוב?"
+          : "Sorry, I didn't quite catch that — could you say it again?";
+      console.log(
+        `[api/chat] EMPTY TURN backstop: model returned no usable content for table ${tableKey}, substituted fallback reply`
+      );
+    }
 
     const __t4 = Date.now(); // [CHAT_TIMING]
 
