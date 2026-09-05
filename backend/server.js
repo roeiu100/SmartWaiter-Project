@@ -119,6 +119,8 @@ Every message before the order is sent ends with a genuine hospitality follow-up
 MULTIPLE TOOLS IN ONE TURN (CRITICAL): One guest message mixing request types -> invoke ALL relevant tools together, never just the first one: kitchen item + runner item -> 'update_cart' + 'request_runner'. A decline/send instruction ("that's it"/"send it") with a runner item pending from earlier in the conversation -> 'submit_order' + 'request_runner' BOTH, even though the runner item wasn't mentioned in this exact message. Item + check request -> the relevant cart tool + 'request_check'. Never handle only the first request and drop the rest.
 
 RUNNER REQUESTS (CRITICAL — separate from food ordering): Non-menu items (napkins, water, ice, condiments, cutlery, extra plate/chair/glass, etc.) are NEVER cart items — never 'update_cart' for them. 1) First such request: confirm in plain text, ask "Anything else?", no tool yet. 2) Keep confirming further requests the same way. 3) On "no"/"that's all"/"nothing" (any language), call 'request_runner' ONCE with every item NOT already listed in "--- Runner requests already sent ---" below, as one comma-separated string. 4) Independent of food ordering, but combine tools when one message covers both (see MULTIPLE TOOLS IN ONE TURN). Before EVER calling 'request_runner', check "--- Runner requests already sent ---" — if the item(s) are already there, do NOT call the tool again and do NOT re-confirm "it's on the way"; that's already handled, just continue the conversation.
+A runner item you only acknowledged in TEXT (e.g. "I've noted napkins for you") is NOT dispatched — saying it is not the same as calling the tool, and staff never see it until 'request_runner' actually fires. Whenever the guest's message is a decline/done signal (step 3 above) OR you're calling 'submit_order' this same turn, that is ALWAYS also your cue to check for any such not-yet-dispatched runner item and call 'request_runner' for it right then — never let a turn's reply be only about food (or only 'submit_order') while a runner item mentioned earlier still hasn't gotten its own tool call.
+    -> Bad: guest says "pizza and napkins" (napkins only acknowledged in text, per step 1), then later says "no thanks" to a side offer, then "that's it" -> replying with a food-only "anything else?" on the decline, then calling only 'submit_order' (no 'request_runner') on "that's it". The napkins were never dispatched even though two separate "done" signals occurred — exactly the bug this note exists to prevent.
 
 CHECK / BILL REQUESTS (CRITICAL): Guest asks for the check/bill/to pay (any language) -> don't call 'update_cart'/'submit_order'; call 'request_check' ONCE, brief confirmation.
 
@@ -1975,6 +1977,20 @@ function buildForcedFinalizeGuestReply(clientCart, menuRows, lang) {
 }
 
 /**
+ * Guest reply text for the RUNNER REQUEST finalization backstop (see
+ * /api/chat) — used only when the backstop itself dispatches
+ * 'request_runner' because the model never called it, so there's no
+ * model-authored guest_reply to fall back on.
+ */
+function buildForcedRunnerGuestReply(items, lang) {
+  const itemsText = (Array.isArray(items) ? items : []).join(", ");
+  if (lang === "he") {
+    return itemsText ? `${itemsText} בדרך אליכם.` : "זה בדרך אליכם.";
+  }
+  return itemsText ? `${itemsText} on the way.` : "That's on the way.";
+}
+
+/**
  * Used by the AI waiter's `request_item_cancellation` tool call — it only
  * knows a table id and a dish name, not an order/item id, so this resolves
  * the most recently-placed, still-active (non-canceled, not already
@@ -2679,6 +2695,95 @@ ${orderStateText}`;
       if (r.createdOrder) createdOrder = r.createdOrder;
     }
 
+    // RUNNER REQUEST FINALIZATION BACKSTOP: independent of the STEP 5 cart
+    // backstop below — a runner request (napkins, etc.) is its own thread
+    // (see "COMPLETELY SEPARATE thread" in RUNNER REQUESTS / STEP 5 above)
+    // and must never depend on food-order state to get dispatched. Live
+    // testing showed the model reliably narrates a runner item in plain
+    // text on first mention ("I've noted napkins for you" — correct, RUNNER
+    // REQUESTS step 1 says no tool yet there) but then frequently never
+    // actually calls 'request_runner' once the guest gives a "no more"
+    // signal or the order gets finalized, even though RUNNER REQUESTS step 3
+    // and STEP 5's "re-scan entire conversation" instruction both explicitly
+    // require it — same class of bug as the STEP 5 backstop, just for the
+    // other tool, and just as invisible to the guest (the AI's own text
+    // claimed it was "noted", so nothing looks wrong until a runner never
+    // shows up table-side).
+    //
+    // Deliberately run as a function called at TWO points rather than once:
+    // first BEFORE the STEP 5 cart backstop below (trigger: the guest's
+    // latest message is itself a decline/done signal), so that if it fires,
+    // the STEP 5 backstop's own "did request_runner fire this turn" WEAK-
+    // signal corroboration check (see below) sees it and can use it —
+    // running this only *after* STEP 5 would make that corroboration signal
+    // permanently unavailable whenever it's this backstop (rather than the
+    // model) doing the dispatching, which live testing confirmed silently
+    // stops the food order itself from ever finalizing on a bare "no". It's
+    // called again AFTER STEP 5 (trigger: 'submit_order' ended up firing
+    // this turn) to also catch an explicit send instruction that isn't
+    // itself a decline phrase (e.g. "please send my order now"). The
+    // function is idempotent — it no-ops immediately if 'request_runner'
+    // already fired this turn — so calling it twice is safe.
+    //
+    // Scans the FULL conversation (not just the capped `history` sent to
+    // Groq) for a mention of a known runner item (from the live "table
+    // service items" list) that isn't already in "--- Runner requests
+    // already sent ---". A mention that also resolves to a real menu item
+    // already in the cart (e.g. "Sparkling Water" the drink vs a generic
+    // "Water" runner option) is excluded — that's a food order, not a
+    // table-service request.
+    //
+    // Unlike the STEP 5 cart backstop, this doesn't wait for a "strong"
+    // signal or a second corroborating decline: a false-positive early
+    // dispatch just means staff bring napkins a beat sooner (harmless, and
+    // `executeChatToolCall`'s duplicate-alert guard still applies), whereas
+    // the observed failure mode is the request never reaching the Runner
+    // dashboard at all.
+    async function maybeForceRunnerDispatch(trigger) {
+      if (!trigger) return;
+      if (tool_calls.some((t) => t.name === "request_runner")) return;
+      const knownRunnerItems = (runnerOptions || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const allUserText = messages
+        .filter((m) => m && typeof m === "object" && m.role === "user" && typeof m.content === "string")
+        .map((m) => m.content)
+        .join(" \n ")
+        .toLowerCase();
+      const undispatched = knownRunnerItems.filter((opt) => {
+        const needle = opt.toLowerCase();
+        if (!allUserText.includes(needle)) return false;
+        const menuId = resolveMenuItemIdByName(menuRows, opt);
+        if (menuId && clientCart.some((l) => l.menu_item_id === menuId)) return false;
+        const alreadyDispatched = tableRunnerAlerts.some((a) =>
+          a.request.toLowerCase().includes(needle)
+        );
+        return !alreadyDispatched;
+      });
+      if (undispatched.length === 0) return;
+
+      const request = undispatched.join(", ");
+      const runnerResult = await executeChatToolCall(
+        { name: "request_runner", arguments: { request } },
+        { tableKey, clientCart }
+      );
+      if (runnerResult.alert) {
+        tool_calls.push({
+          id: `forced_runner_${Date.now()}`,
+          name: "request_runner",
+          arguments: {
+            request,
+            guest_reply: buildForcedRunnerGuestReply(undispatched, latestUserLang),
+          },
+        });
+        console.log(
+          `[api/chat] RUNNER finalization backstop: model omitted request_runner, forced it for table ${tableKey}: "${request}"`
+        );
+      }
+    }
+    await maybeForceRunnerDispatch(isDeclineFurtherItemsPhrase(latestUserText));
+
     // STEP 5 FINALIZATION BACKSTOP: the model is instructed (STEP 5 /
     // NO REPEATED CONFIRMATIONS / MULTIPLE TOOLS IN ONE TURN above) to call
     // 'submit_order' the moment the guest declines further items with a
@@ -2756,6 +2861,14 @@ ${orderStateText}`;
         }
       }
     }
+
+    // Second call point for the runner backstop defined above — catches an
+    // explicit send instruction that isn't itself a decline phrase (e.g.
+    // "please send my order now") but did result in 'submit_order' firing
+    // this turn (organically or via the STEP 5 backstop just above). A
+    // no-op if the first call point already dispatched it.
+    await maybeForceRunnerDispatch(tool_calls.some((t) => t.name === "submit_order"));
+
     const __t4 = Date.now(); // [CHAT_TIMING]
 
     chatTimingLog({
