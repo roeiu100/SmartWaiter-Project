@@ -90,21 +90,57 @@ function friendlyChatFailureMessage(raw: string, lang: "he" | "en"): string {
   return raw;
 }
 
-/** User said they don't want more items (not e.g. "no tomatoes"). */
+const STRONG_DONE_CORE_PHRASES = new Set([
+  "nothing else",
+  "nothing more",
+  "that's all",
+  "that is all",
+  "that'll be all",
+  "that will be all",
+  "that's it",
+  "that is it",
+  "that's everything",
+  "that covers it",
+  "all set",
+  "we're all set",
+  "we are all set",
+  "i'm all set",
+  "i am all set",
+  "i'm good",
+  "i am good",
+  "we're good",
+  "we are good",
+  "i'm done",
+  "i am done",
+  "we're done",
+  "we are done",
+]);
+
+/**
+ * User said they don't want more items (not e.g. "no tomatoes"). Mirrors
+ * `isDeclineFurtherItemsPhrase` in backend/server.js (see that file's doc
+ * comment) — kept broad enough to also catch compound phrasing like "No,
+ * that's it" rather than only a bare "no".
+ */
 function userDeclinesFurtherItems(text: string): boolean {
   const raw = text.trim();
   if (!raw) return false;
-  const t = raw.toLowerCase();
-  if (
-    /^(no|nope|no thanks|no thank you|nothing else|that'?s all|that is all|all set|i'?m good|we'?re good)\.?$/i.test(
-      t
-    )
-  ) {
-    return true;
-  }
-  if (/^לא(\s+תודה)?\.?$/i.test(raw)) return true;
-  if (/^(זהו|סיימתי)\.?$/i.test(raw)) return true;
-  return false;
+  const rawNoPunct = raw.replace(/[.!?]+$/g, "").trim();
+  if (/^לא(\s+תודה)?$/i.test(rawNoPunct)) return true;
+  if (/^(זהו|סיימתי)$/i.test(rawNoPunct)) return true;
+
+  const t = raw
+    .replace(/[‘’]/g, "'")
+    .toLowerCase()
+    .replace(/[!.?]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (/^(no|nope|nah|no thanks|no thank you)$/.test(t)) return true;
+  const core = t
+    .replace(/^(no|nope|nah)\b[,]?\s*/, "")
+    .replace(/\s*[,]?\s*(thanks|thank you|please)$/, "")
+    .trim();
+  return STRONG_DONE_CORE_PHRASES.has(core);
 }
 
 type SubmitOutcome = "ok" | "empty" | "error" | null;

@@ -106,6 +106,8 @@ STEP 3 (Drink Pairing): If they accept Step 2's side, call 'update_cart' for THA
 STEP 4 (Anything Else): Call 'update_cart' for the drink if ordered, confirm it, ask if they'd like anything else. NEVER mention dessert. Decline -> go straight to STEP 5.
 STEP 5 (Finish & Send): Check "--- Your current cart ---" below — if non-empty, call 'submit_order' in THIS SAME TURN, no waiting for a second "yes". Any of these IS the confirmation: (a) they decline further items ("no"/"that's all"/"that's it"/similar); (b) they confirm a summary you gave; (c) they directly instruct you to send/submit (any language). Empty cart -> don't call it, just handle whatever else was asked. Before calling 'submit_order', re-scan this ENTIRE conversation (not just the latest message) for any runner/table-service request that hasn't been dispatched yet — if you find one, you MUST call 'submit_order' AND 'request_runner' together in this same turn, never 'request_runner' alone with the cart left unsent.
     -> Example: earlier the guest asked for ketchup/napkins (only acknowledged in text, not yet dispatched) and also has a main dish in the cart; now they say "that's it" — call BOTH 'submit_order' (cart is non-empty) AND 'request_runner' (ketchup, napkins) in this one turn. Firing only 'request_runner' here and leaving the cart unsent is exactly the bug this note exists to prevent.
+A runner request (napkins, water, etc.) is a COMPLETELY SEPARATE thread from the food order — dispatching or confirming it NEVER counts as finishing the food order, and never justifies replying about only the runner item while the cart sits unsent. If the cart is non-empty and the guest gave a done signal, 'submit_order' fires this turn regardless of whether a runner request was also involved.
+    -> Bad: guest orders a main dish and asks for napkins, then declines a suggested side with "No thanks, that's it" -> replying "Napkins are on the way" and stopping there. The napkin request being handled changes nothing about the main dish still sitting in the cart — 'submit_order' MUST also fire this turn.
 'guest_reply' MUST restate the complete itemized order and state it's been sent — e.g. "Here's your order: one Ribeye (medium-rare) and truffle fries. This has been sent to the kitchen." Never claim it's sent before actually calling the tool.
 
 NO REPEATED CONFIRMATIONS (CRITICAL): Once you've said "Added <item>" for something, that's said — never say it again in a later reply, and never re-call 'update_cart' for it (see the cart section below, which always shows the current, already-added state). If the guest's reply doesn't introduce a new item, don't restate an old confirmation as filler — always move the conversation forward instead: continue the 6-step flow (next unresolved step), or, if the cart is non-empty and they've now given you a second signal that they're done (declining again, "good"/"that's it" after already declining once, or anything covered by STEP 5's confirmation list), that means STOP ASKING AND FINALIZE — call 'submit_order' THIS TURN rather than asking "anything else?" yet again. Never let the guest re-decline the same "anything else?" question more than once without calling 'submit_order' if the cart is non-empty.
@@ -1839,27 +1841,105 @@ function resolveMenuItemIdByName(menuRows, itemName) {
 }
 
 /**
- * Guest reply text that means "no more items, I'm done" — mirrors
- * `userDeclinesFurtherItems` in the frontend's ChatScreen.tsx. Duplicated
- * (not imported) because the backend is a separate Node process/deploy from
- * the RN app; used by the STEP 5 finalization backstop in /api/chat (see
- * doc comment there) to detect when the model should have called
- * 'submit_order' but didn't.
+ * A bare "no"/"nope"/"nah" (with or without a polite "thanks" tail) only
+ * rejects the item/question just offered — mid-flow (e.g. declining a side
+ * while the drink question hasn't been asked yet), that's not proof the
+ * guest is done ordering overall, so the STEP 5 backstop treats these as a
+ * WEAK signal requiring corroboration (see `isStrongDoneSignal` below).
+ */
+const WEAK_DECLINE_ALONE = new Set(["no", "nope", "nah", "no thanks", "no thank you"]);
+
+/**
+ * Explicit full-stop phrasing ("that's it", "nothing else", "all set", "I'm
+ * done", etc, with or without a leading "no" and/or trailing "thanks") is
+ * unambiguous regardless of what question it's answering — declining a
+ * specific upsell item (e.g. "No thanks, that's it" after being offered a
+ * Caesar Salad) with this wording is just as final as answering a plain
+ * "anything else?" the same way. STEP 5 in SYSTEM_PROMPT already lists these
+ * as needing no second confirmation, so the backstop honors that on the
+ * first occurrence — see `isStrongDoneSignal` below.
+ */
+const STRONG_DONE_CORE_PHRASES = new Set([
+  "nothing else",
+  "nothing more",
+  "that's all",
+  "that is all",
+  "that'll be all",
+  "that will be all",
+  "that's it",
+  "that is it",
+  "that's everything",
+  "that covers it",
+  "all set",
+  "we're all set",
+  "we are all set",
+  "i'm all set",
+  "i am all set",
+  "i'm good",
+  "i am good",
+  "we're good",
+  "we are good",
+  "i'm done",
+  "i am done",
+  "we're done",
+  "we are done",
+]);
+
+function normalizeDeclineText(text) {
+  return (text ?? "")
+    .toString()
+    .trim()
+    .replace(/[‘’]/g, "'")
+    .toLowerCase()
+    .replace(/[!.?]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Strips an optional leading "no"/"nope"/"nah" and an optional trailing
+// "thanks"/"thank you"/"please" so compound phrasing like "No, that's it,
+// thanks" or "Nope, all set" reduces to the core closing phrase for matching
+// against STRONG_DONE_CORE_PHRASES.
+function stripDeclineFiller(normalized) {
+  return normalized
+    .replace(/^(no|nope|nah)\b[,]?\s*/, "")
+    .replace(/\s*[,]?\s*(thanks|thank you|please)$/, "")
+    .trim();
+}
+
+/**
+ * True only for an explicit, unambiguous "I'm completely done" phrase —
+ * never for a bare "no" alone, since that could just be declining the one
+ * item/question just offered. Used by the STEP 5 finalization backstop to
+ * finalize a non-empty cart on the FIRST such signal, without waiting for a
+ * second decline or a `request_runner` call as corroboration.
+ */
+function isStrongDoneSignal(text) {
+  const raw = (text ?? "").toString().trim();
+  if (!raw) return false;
+  const rawNoPunct = raw.replace(/[.!?]+$/g, "").trim();
+  if (/^(זהו|סיימתי)$/i.test(rawNoPunct)) return true;
+  return STRONG_DONE_CORE_PHRASES.has(stripDeclineFiller(normalizeDeclineText(raw)));
+}
+
+/**
+ * Guest reply text that means "no more items, I'm done" (weak OR strong —
+ * see above) — mirrors `userDeclinesFurtherItems` in the frontend's
+ * ChatScreen.tsx. Duplicated (not imported) because the backend is a
+ * separate Node process/deploy from the RN app; used by the STEP 5
+ * finalization backstop in /api/chat (see doc comment there) to detect when
+ * the model should have called 'submit_order' but didn't.
  */
 function isDeclineFurtherItemsPhrase(text) {
   const raw = (text ?? "").toString().trim();
   if (!raw) return false;
-  const t = raw.toLowerCase();
-  if (
-    /^(no|nope|no thanks|no thank you|nothing else|that'?s all|that is all|all set|i'?m good|we'?re good)\.?$/i.test(
-      t
-    )
-  ) {
-    return true;
-  }
-  if (/^לא(\s+תודה)?\.?$/i.test(raw)) return true;
-  if (/^(זהו|סיימתי)\.?$/i.test(raw)) return true;
-  return false;
+  const rawNoPunct = raw.replace(/[.!?]+$/g, "").trim();
+  if (/^לא(\s+תודה)?$/i.test(rawNoPunct)) return true;
+  if (/^(זהו|סיימתי)$/i.test(rawNoPunct)) return true;
+
+  const t = normalizeDeclineText(raw);
+  if (WEAK_DECLINE_ALONE.has(t)) return true;
+  return STRONG_DONE_CORE_PHRASES.has(stripDeclineFiller(t));
 }
 
 /**
@@ -2609,21 +2689,34 @@ ${orderStateText}`;
     // food never reaches the kitchen with no error shown to them at all —
     // worse than a premature submit, which at most sends real, already-
     // agreed-upon cart contents a turn early. So: if the model did NOT call
-    // 'submit_order' this turn, the cart is genuinely non-empty, the guest's
-    // latest message is a plain decline ("no"/"that's all"/etc, no new
-    // item), and this is at least the SECOND signal that they're done —
-    // either they've already declined once before in this conversation, or
-    // the model itself just fired 'request_runner' (which only fires on a
-    // "no more" signal, see RUNNER REQUESTS above) — then finalize for real
-    // here: actually call createOrderFromCart (never fabricate a "sent"
-    // claim), and only synthesize a submit_order tool_call/guest_reply for
-    // the client to show if that call genuinely succeeded. Once it
-    // succeeds, the client clears its cart (see ChatScreen.tsx), so
-    // `cartIsNonEmpty` is false on every later turn — this can't re-fire for
-    // the same order.
+    // 'submit_order' this turn, the cart is genuinely non-empty, and the
+    // guest's latest message is a decline ("no"/"that's all"/"that's it"/
+    // etc, no new item) — finalize for real here: actually call
+    // createOrderFromCart (never fabricate a "sent" claim), and only
+    // synthesize a submit_order tool_call/guest_reply for the client to show
+    // if that call genuinely succeeded. Once it succeeds, the client clears
+    // its cart (see ChatScreen.tsx), so `cartIsNonEmpty` is false on every
+    // later turn — this can't re-fire for the same order.
+    //
+    // How much corroboration is required depends on how explicit the
+    // decline is (see isStrongDoneSignal doc comment): a STRONG "I'm
+    // completely done" phrase ("that's it"/"nothing else"/"all set"/etc) is
+    // unambiguous on its own, even the very first time it's said and even
+    // when it's answering a specific upsell offer (e.g. declining a
+    // suggested side with "No thanks, that's it") rather than a plain
+    // "anything else?" — a runner request (e.g. napkins) being mentioned or
+    // dispatched earlier/alongside is irrelevant to this and never
+    // substitutes for it; food-order completion is judged purely from the
+    // guest's own words. A WEAK bare "no"/"nope" alone is kept more
+    // conservative and still requires a second signal (a prior decline
+    // elsewhere in the conversation, or the model itself firing
+    // 'request_runner' this turn) before forcing finalization — otherwise a
+    // guest declining a side offer while the drink question hasn't even
+    // been asked yet would get their order finalized prematurely.
     if (!createdOrder && !orderError && cartIsNonEmpty) {
       const submitOrderCalledThisTurn = tool_calls.some((t) => t.name === "submit_order");
       if (!submitOrderCalledThisTurn && isDeclineFurtherItemsPhrase(latestUserText)) {
+        const strongDoneSignal = isStrongDoneSignal(latestUserText);
         const runnerCalledThisTurn = tool_calls.some((t) => t.name === "request_runner");
         const priorDeclineSeen = messages.some(
           (m) =>
@@ -2633,7 +2726,7 @@ ${orderStateText}`;
             m !== latestUserMessage &&
             isDeclineFurtherItemsPhrase(typeof m.content === "string" ? m.content : "")
         );
-        if (runnerCalledThisTurn || priorDeclineSeen) {
+        if (strongDoneSignal || runnerCalledThisTurn || priorDeclineSeen) {
           const forced = await createOrderFromCart({ table_id: tableKey, items: clientCart });
           if (forced.order) {
             createdOrder = forced.order;
@@ -2645,7 +2738,7 @@ ${orderStateText}`;
               },
             });
             console.log(
-              `[api/chat] STEP 5 finalization backstop: model omitted submit_order, forced it for table ${tableKey}`
+              `[api/chat] STEP 5 finalization backstop: model omitted submit_order, forced it for table ${tableKey} (signal=${strongDoneSignal ? "strong" : runnerCalledThisTurn ? "runner" : "prior-decline"})`
             );
           } else if (forced.error) {
             // Don't surface this as `orderError` here — no submit_order
