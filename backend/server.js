@@ -118,10 +118,15 @@ Every message before the order is sent ends with a genuine hospitality follow-up
 
 MULTIPLE TOOLS IN ONE TURN (CRITICAL): One guest message mixing request types -> invoke ALL relevant tools together, never just the first one. This does NOT mean 'request_runner' fires on a brand-new runner item's first mention (see RUNNER REQUESTS step 1 — that's still text-only) — it applies once the runner item is actually eligible for dispatch: a decline/send instruction ("that's it"/"send it") with a runner item pending from earlier in the conversation -> 'submit_order' + 'request_runner' BOTH, even though the runner item wasn't mentioned in this exact message. Item + check request -> the relevant cart tool + 'request_check'. Never handle only the first request and drop the rest.
 
-COMPLETE REPLIES FOR MULTI-PART MESSAGES (CRITICAL): If the guest's message contains more than one distinct ask — a food item AND a runner request, a food item AND a question, etc. — your ONE reply this turn MUST address EVERY part of it. This is about the WORDS in your reply, completely independent of whatever tools you do or don't call this turn: whether you call 'update_cart' (STEP 2), ask a plain-text modifier question with no tool call yet (STEP 1), or anything else, that same reply's words must still cover every other part of the guest's message too (e.g. a runner item's plain-text acknowledgment). Never send a reply that covers only one part and stops, leaving the guest to prompt you again (e.g. saying "And") just to get the rest acknowledged — that is a broken reply, not a valid turn.
+COMPLETE REPLIES FOR MULTI-PART MESSAGES (CRITICAL): If the guest's message contains more than one distinct ask — multiple menu items, an item AND a runner request, an item AND a genuine question (a recommendation, an ingredient/allergy question, availability, etc.) — your ONE reply this turn MUST address EVERY part of it: every item named gets added (or clarified if genuinely ambiguous), and every question gets an actual, specific answer (e.g. naming a real dish for a recommendation). This is about the WORDS in your reply, completely independent of whatever tools you do or don't call this turn: whether you call 'update_cart' (STEP 2) — once per item named, see MULTIPLE ITEMS IN ONE MESSAGE below — ask a plain-text modifier question with no tool call yet (STEP 1), or anything else, that same reply's words must still cover every other part of the guest's message too. Never send a reply that covers only one part and stops, leaving the guest to prompt you again (e.g. saying "And") just to get the rest acknowledged, or leaving a direct question hanging with no answer at all — that is a broken reply, not a valid turn.
     -> Bad: guest says "I want pizza and napkins" -> replying "Added the Margherita Pizza to your order." and stopping there, with no mention of napkins at all until the guest says "And" or otherwise re-raises it. The napkin request was already in the SAME message; it must be acknowledged in this SAME reply.
-    -> Good: "Added the Margherita Pizza to your order. I've noted napkins for you. Might I suggest our Caesar Salad alongside it?" — one reply, every part of the guest's message addressed.
+    -> Bad: guest says "I'll start with the eggplant and a lemonade, and please recommend a main dish" -> adding only the eggplant (or only the lemonade), and never giving any main-dish recommendation at all. Silently dropping a whole menu item AND ignoring a direct question is worse than the napkins example — the guest asked for THREE things and got, at most, one.
+    -> Good: "Added the Eggplanet With Thini and a Fresh Lemonade to your order. For a main, might I recommend the Grilled Salmon?" — one reply, every part of the guest's message addressed.
     -> Good (no tool call yet, per STEP 1's "ask:" question): guest says "I want a burger and extra napkins" -> "How would you like the burger cooked — rare, medium, or well? I've noted extra napkins for you." — the modifier question AND the runner acknowledgment together, in plain text, before 'update_cart' ever fires.
+
+MULTIPLE ITEMS IN ONE MESSAGE (CRITICAL): If the guest's message names two or more menu items at once (a starter AND a drink, two mains, etc.), call 'update_cart' ONCE FOR EACH item — never just the first one. This is the same "never handle only the first request and drop the rest" principle as MULTIPLE TOOLS IN ONE TURN below, applied to 'update_cart' itself: naming several items in one message is not a reason to add only one and leave the rest for a later turn. Mentioning an item in your reply text is NOT a substitute for actually calling 'update_cart' for it — only a real tool call adds it to the order.
+    -> Bad: guest says "I'll have the Eggplanet With Thini and a Fresh Lemonade" -> calling 'update_cart' only for the Eggplanet, whether or not the Lemonade is mentioned in the reply text.
+    -> Good: call 'update_cart' for the Eggplanet AND call 'update_cart' again for the Fresh Lemonade, both in this one turn, with a single 'guest_reply' confirming both together.
 
 RUNNER REQUESTS (CRITICAL — separate from food ordering): Non-menu items (napkins, water, ice, condiments, cutlery, extra plate/chair/glass, etc.) are NEVER cart items — never 'update_cart' for them. 1) First such request: confirm in plain text, ask "Anything else?", no tool yet. 2) Keep confirming further requests the same way. 3) On "no"/"that's all"/"nothing" (any language), call 'request_runner' ONCE with every item NOT already listed in "--- Runner requests already sent ---" below, as one comma-separated string. 4) Independent of food ordering, but combine tools when one message covers both (see MULTIPLE TOOLS IN ONE TURN). Before EVER calling 'request_runner', check "--- Runner requests already sent ---" — if the item(s) are already there, do NOT call the tool again and do NOT re-confirm "it's on the way"; that's already handled, just continue the conversation.
 A runner item you only acknowledged in TEXT (e.g. "I've noted napkins for you") is NOT dispatched — saying it is not the same as calling the tool, and staff never see it until 'request_runner' actually fires. Whenever the guest's message is a decline/done signal (step 3 above) OR you're calling 'submit_order' this same turn, that is ALWAYS also your cue to check for any such not-yet-dispatched runner item and call 'request_runner' for it right then — never let a turn's reply be only about food (or only 'submit_order') while a runner item mentioned earlier still hasn't gotten its own tool call.
@@ -1848,6 +1853,66 @@ function resolveMenuItemIdByName(menuRows, itemName) {
 }
 
 /**
+ * Live testing showed the model has a near-total inability to call
+ * 'update_cart' more than once in the same turn — a guest message naming
+ * two menu items (e.g. "the eggplant starter and a lemonade") reliably adds
+ * only the first and drops the second completely, even with an explicit
+ * "call it once per item" prompt rule (MULTIPLE ITEMS IN ONE MESSAGE in
+ * SYSTEM_PROMPT). Used by the MULTI-ITEM MENTION backstop in /api/chat to
+ * find a second real menu item the guest's latest message named that never
+ * got added this turn — deliberately conservative (only runs when exactly
+ * one 'update_cart' call happened, i.e. the model was actively in ordering
+ * mode) since a false positive here just adds a slightly odd clarifying
+ * question, not a wrong charge.
+ */
+function findUnaddressedMenuItemMention({
+  latestUserText,
+  menuRows,
+  clientCartBeforeTurn,
+  tool_calls,
+}) {
+  // Require exactly one update_cart call that actually resolved to a real
+  // menu item — not just one call syntactically. A vacuous call (blank
+  // item_name — the same rare Groq artifact the EMPTY TURN backstop below
+  // partially handles) doesn't mean "one item successfully handled"; if we
+  // gated on call count alone, that lone item named in the guest's message
+  // would itself get flagged as a false-positive "second missed item" since
+  // its id never made it into `handledIds`.
+  const updateCartCalls = tool_calls.filter((t) => t.name === "update_cart");
+  const resolvedIds = updateCartCalls
+    .map((tc) => resolveMenuItemIdByName(menuRows, tc.arguments?.item_name))
+    .filter((id) => id != null);
+  if (resolvedIds.length !== 1) return null;
+
+  const handledIds = new Set([
+    ...(Array.isArray(clientCartBeforeTurn) ? clientCartBeforeTurn : [])
+      .map((l) => l?.menu_item_id)
+      .filter((id) => typeof id === "string"),
+    ...resolvedIds,
+  ]);
+
+  const text = (latestUserText ?? "").toString().toLowerCase();
+  if (!text) return null;
+  const rows = Array.isArray(menuRows) ? menuRows : [];
+  for (const item of rows) {
+    const name = (item.name ?? "").trim().toLowerCase();
+    if (!name || handledIds.has(item.id)) continue;
+    // Guests casually reference an item by its distinctive noun ("lemonade"
+    // for "Fresh Lemonade"), not the full catalog name — same reason
+    // resolveMenuItemIdByName does substring matching, but word-level here
+    // since the guest's phrase and the item name rarely nest as substrings
+    // of each other. Word-boundary match on words of 5+ chars only, so
+    // short generic words ("with", "and") can't false-positive alone.
+    const words = name.split(/\s+/).filter((w) => w.length >= 5);
+    const matchesWord = words.some((w) =>
+      new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(text)
+    );
+    if (matchesWord || text.includes(name)) return item.name;
+  }
+  return null;
+}
+
+/**
  * A bare "no"/"nope"/"nah" (with or without a polite "thanks" tail) only
  * rejects the item/question just offered — mid-flow (e.g. declining a side
  * while the drink question hasn't been asked yet), that's not proof the
@@ -2676,6 +2741,56 @@ ${orderStateText}`;
             ? "זה כבר בהזמנה שלכם — משהו נוסף, או שאשלח את ההזמנה למטבח?"
             : "That's already on your order — anything else, or shall I send this to the kitchen?",
       };
+    }
+
+    // MULTI-ITEM MENTION BACKSTOP: see findUnaddressedMenuItemMention doc
+    // comment — prompt-only fixes could not get the model to reliably call
+    // 'update_cart' twice in one turn (0/20 live even after an explicit
+    // rule), so rather than silently guessing a quantity/modifier and
+    // adding a second cart line ourselves (real financial/trust risk if we
+    // guess wrong, or false-positive on an item only mentioned in passing —
+    // e.g. an ingredient question), this only makes the miss VISIBLE: append
+    // a plain clarifying question to whichever guest-facing reply exists
+    // this turn, so the guest can immediately say "yes" or correct it,
+    // instead of discovering the drop only when the order arrives
+    // incomplete.
+    {
+      const missedItemName = findUnaddressedMenuItemMention({
+        latestUserText,
+        menuRows,
+        clientCartBeforeTurn: clientCart,
+        tool_calls,
+      });
+      if (missedItemName) {
+        const nudge =
+          latestUserLang === "he"
+            ? `רציתם שאוסיף גם ${missedItemName}?`
+            : `Did you also want me to add the ${missedItemName}?`;
+        const primaryCall = tool_calls.find(
+          (t) => typeof t.arguments?.guest_reply === "string" && t.arguments.guest_reply.trim()
+        );
+        if (primaryCall) {
+          primaryCall.arguments.guest_reply = `${primaryCall.arguments.guest_reply.trim()} ${nudge}`;
+        } else {
+          // No existing non-empty guest-facing reply to append to — either a
+          // blank 'guest_reply' on the update_cart call itself (a separate,
+          // rare Groq quirk) or a fully empty turn. Set/create one directly
+          // rather than silently losing the nudge, so the guest is never
+          // left with nothing even when this backstop is the only thing
+          // that produced any content this turn.
+          const updateCartCall = tool_calls.find((t) => t.name === "update_cart");
+          if (updateCartCall) {
+            updateCartCall.arguments = { ...updateCartCall.arguments, guest_reply: nudge };
+          } else if (text && text.trim()) {
+            text = `${text.trim()} ${nudge}`;
+          } else {
+            text = nudge;
+          }
+        }
+        console.log(
+          `[api/chat] MULTI-ITEM MENTION backstop: guest may have also wanted "${missedItemName}" for table ${tableKey}, appended clarifying nudge`
+        );
+      }
     }
 
     // Server-side tool dispatch. We still return the FULL tool_calls array
