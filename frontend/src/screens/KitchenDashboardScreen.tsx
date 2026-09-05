@@ -112,9 +112,9 @@ type OrderTicketProps = {
   order: ActiveOrder;
   currentTime: number;
   isExpanded: boolean;
+  isDetailOpen: boolean;
   cardWidth: number;
   onToggleExpand: () => void;
-  onCollapseAccordion: () => void;
   onOpenTicketMenu: () => void;
   onToggleItemReady: (
     orderId: string,
@@ -122,20 +122,20 @@ type OrderTicketProps = {
     currentStatus: ActiveOrderItemStatus
   ) => void;
   onMarkAllReady: () => void;
-  onOpenDetail: () => void;
+  onToggleDetail: () => void;
 };
 
 function OrderTicket({
   order,
   currentTime,
   isExpanded,
+  isDetailOpen,
   cardWidth,
   onToggleExpand,
-  onCollapseAccordion,
   onOpenTicketMenu,
   onToggleItemReady,
   onMarkAllReady,
-  onOpenDetail,
+  onToggleDetail,
 }: OrderTicketProps) {
   const ageMs = getOrderElapsedMs(order.created_at, currentTime);
   const isStale = ageMs >= STALE_AFTER_MS;
@@ -159,28 +159,12 @@ function OrderTicket({
       ? liveItems
       : liveItems.slice(0, COLLAPSED_ITEM_COUNT);
 
-  const onPressCard = () => {
-    if (isExpanded) {
-      onCollapseAccordion();
-      return;
-    }
-    onOpenDetail();
-  };
-
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={
-        isExpanded
-          ? `Ticket table ${order.table_id}. Tap to collapse list.`
-          : `Ticket table ${order.table_id}. Tap for full detail.`
-      }
-      onPress={onPressCard}
-      style={({ pressed }) => [
+    <View
+      style={[
         styles.ticketOuter,
         { width: cardWidth },
         isStale && styles.ticketOuterStale,
-        pressed && styles.ticketOuterPressed,
       ]}
     >
       <View style={styles.ticketHeader}>
@@ -338,8 +322,25 @@ function OrderTicket({
             {canMarkAll ? "Ready" : "Done"}
           </Text>
         </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={
+            isDetailOpen
+              ? `Hide full details for table ${order.table_id}`
+              : `View full details for table ${order.table_id}`
+          }
+          onPress={onToggleDetail}
+          style={({ pressed }) => [
+            styles.detailBtn,
+            pressed && styles.detailBtnPressed,
+          ]}
+        >
+          <Text style={styles.detailBtnText} numberOfLines={1}>
+            {isDetailOpen ? "▲ Hide Details" : "▼ View Details"}
+          </Text>
+        </Pressable>
       </View>
-    </Pressable>
+    </View>
   );
 }
 
@@ -350,6 +351,11 @@ type OrderDetailModalProps = {
   modalHeight: number;
   onClose: () => void;
   onMarkAllReady: () => void;
+  onToggleItemReady: (
+    orderId: string,
+    itemId: string,
+    currentStatus: ActiveOrderItemStatus
+  ) => void;
 };
 
 function OrderDetailModal({
@@ -359,13 +365,8 @@ function OrderDetailModal({
   modalHeight,
   onClose,
   onMarkAllReady,
+  onToggleItemReady,
 }: OrderDetailModalProps) {
-  const [checkedItems, setCheckedItems] = useState<Set<string>>(() => new Set());
-
-  useEffect(() => {
-    setCheckedItems(new Set());
-  }, [order.id]);
-
   const liveItems = order.items.filter((it) => it.status !== "canceled");
   const pendingCount = liveItems.filter((it) => it.status === "pending")
     .length;
@@ -373,16 +374,6 @@ function OrderDetailModal({
   const ageMs = getOrderElapsedMs(order.created_at, currentTime);
   const isStale = ageMs >= STALE_AFTER_MS;
   const elapsedColor = getElapsedTimeColor(ageMs);
-
-  const toggleLocalChecked = (itemId: string) => {
-    const key = `${order.id}:${itemId}`;
-    setCheckedItems((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
 
   return (
     <Modal
@@ -444,32 +435,32 @@ function OrderDetailModal({
               const notes = (line.notes ?? "").trim();
               const isReady = line.status === "ready";
               const isServed = line.status === "served";
+              const done = isReady || isServed;
               const statusLabel = isServed
                 ? "Delivered"
                 : isReady
                   ? "Ready"
                   : "Pending";
-              const localKey = `${order.id}:${line.id}`;
-              const locallyDone = checkedItems.has(localKey);
               return (
                 <Pressable
                   key={line.id}
                   accessibilityRole="checkbox"
-                  accessibilityState={{ checked: locallyDone }}
-                  onPress={() => toggleLocalChecked(line.id)}
+                  accessibilityState={{ checked: done, disabled: isServed }}
+                  onPress={() => onToggleItemReady(order.id, line.id, line.status)}
+                  disabled={isServed}
                   style={({ pressed }) => [
                     styles.modalItemRow,
-                    locallyDone && styles.modalItemRowDone,
-                    pressed && styles.modalItemRowPressed,
+                    done && styles.modalItemRowDone,
+                    pressed && !isServed && styles.modalItemRowPressed,
                   ]}
                 >
                   <View
                     style={[
                       styles.modalLocalCheckbox,
-                      locallyDone && styles.modalLocalCheckboxOn,
+                      done && styles.modalLocalCheckboxOn,
                     ]}
                   >
-                    {locallyDone ? (
+                    {done ? (
                       <Text style={styles.modalLocalCheckboxTick}>✓</Text>
                     ) : null}
                   </View>
@@ -477,13 +468,13 @@ function OrderDetailModal({
                     <Text
                       style={[
                         styles.modalLineTitle,
-                        locallyDone && styles.modalLineTitleDone,
+                        done && styles.modalLineTitleDone,
                       ]}
                     >
                       <Text
                         style={[
                           styles.modalLineQty,
-                          locallyDone && styles.modalLineQtyDone,
+                          done && styles.modalLineQtyDone,
                         ]}
                       >
                         {line.quantity ?? 1}×{" "}
@@ -493,11 +484,10 @@ function OrderDetailModal({
                     <Text
                       style={[
                         styles.modalLineStatus,
-                        locallyDone && styles.modalLineStatusDone,
+                        done && styles.modalLineStatusDone,
                       ]}
                     >
                       {statusLabel}
-                      {locallyDone ? " · Cooked (local)" : ""}
                     </Text>
                     {notes ? (
                       <View style={styles.modalNotesWrap}>
@@ -505,7 +495,7 @@ function OrderDetailModal({
                         <Text
                           style={[
                             styles.modalNotesText,
-                            locallyDone && styles.modalNotesTextDone,
+                            done && styles.modalNotesTextDone,
                           ]}
                         >
                           {notes}
@@ -872,13 +862,17 @@ export function KitchenDashboardScreen() {
                   order={order}
                   currentTime={currentTime}
                   isExpanded={expandedCardId === order.id}
+                  isDetailOpen={selectedOrder?.id === order.id}
                   cardWidth={cardWidth}
                   onToggleExpand={() => toggleAccordionOrder(order.id)}
-                  onCollapseAccordion={() => setExpandedCardId(null)}
                   onOpenTicketMenu={() => openTicketMenu(order)}
                   onToggleItemReady={toggleItemReady}
                   onMarkAllReady={() => void markAllAsReady(order)}
-                  onOpenDetail={() => setSelectedOrder(order)}
+                  onToggleDetail={() =>
+                    setSelectedOrder((prev) =>
+                      prev?.id === order.id ? null : order
+                    )
+                  }
                 />
               </View>
             ))}
@@ -894,6 +888,7 @@ export function KitchenDashboardScreen() {
           modalHeight={modalMaxHeight}
           onClose={() => setSelectedOrder(null)}
           onMarkAllReady={() => void markAllAsReady(selectedOrder)}
+          onToggleItemReady={toggleItemReady}
         />
       ) : null}
     </View>
@@ -1024,7 +1019,6 @@ const styles = StyleSheet.create({
     borderColor: STALE_TICKET_BORDER,
     borderLeftColor: STALE_ACCENT,
   },
-  ticketOuterPressed: { opacity: 0.94 },
 
   ticketHeader: {
     flexDirection: "row",
@@ -1228,6 +1222,22 @@ const styles = StyleSheet.create({
   },
   markReadyBtnTextOff: {
     color: "#57534E",
+  },
+  detailBtn: {
+    marginTop: 5,
+    paddingVertical: 5,
+    borderRadius: 4,
+    alignItems: "center",
+    backgroundColor: premium.kitchenSoft,
+    borderWidth: 1,
+    borderColor: premium.kitchen,
+  },
+  detailBtnPressed: { opacity: 0.85 },
+  detailBtnText: {
+    color: premium.kitchen,
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 0.3,
   },
 
   modalRoot: {

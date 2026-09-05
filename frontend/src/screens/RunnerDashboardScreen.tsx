@@ -118,13 +118,22 @@ function parseRunnerAlert(data: unknown): RunnerAlert | null {
   return { id: idNum, table, request, time };
 }
 
-/** Orders with at least one ready line waiting for the runner. */
+/**
+ * Orders the runner still has work to do on: at least one line has reached
+ * "ready" or "served" at some point. This must NOT require a currently-ready
+ * line — once the kitchen has touched an order, it stays on this screen
+ * until every live line is served (server flips the order to "delivered"
+ * at that point, which removes it from `orders` entirely — see
+ * `onOrderStatusChanged` below). Requiring a live "ready" item here would
+ * make the order vanish the moment its last-ready line gets picked up while
+ * other lines are still cooking, even though there's still more to deliver.
+ */
 function getRunnerQueue(orders: ActiveOrder[]): ActiveOrder[] {
   return orders
     .filter(
       (o) =>
         o.status !== "delivered" &&
-        o.items.some((it) => it.status === "ready")
+        o.items.some((it) => it.status === "ready" || it.status === "served")
     )
     .slice()
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
@@ -134,26 +143,26 @@ type RunnerTicketProps = {
   order: ActiveOrder;
   currentTime: number;
   isExpanded: boolean;
+  isDetailOpen: boolean;
   cardWidth: number;
   onToggleExpand: () => void;
-  onCollapseAccordion: () => void;
   onOpenTicketMenu: () => void;
   onServeItem: (orderId: string, itemId: string, status: ActiveOrderItemStatus) => void;
   onMarkAllDelivered: () => void;
-  onOpenDetail: () => void;
+  onToggleDetail: () => void;
 };
 
 function RunnerOrderTicket({
   order,
   currentTime,
   isExpanded,
+  isDetailOpen,
   cardWidth,
   onToggleExpand,
-  onCollapseAccordion,
   onOpenTicketMenu,
   onServeItem,
   onMarkAllDelivered,
-  onOpenDetail,
+  onToggleDetail,
 }: RunnerTicketProps) {
   const ageMs = getOrderElapsedMs(order.created_at, currentTime);
   const isStale = ageMs >= STALE_AFTER_MS;
@@ -175,28 +184,12 @@ function RunnerOrderTicket({
       ? liveItems
       : liveItems.slice(0, COLLAPSED_ITEM_COUNT);
 
-  const onPressCard = () => {
-    if (isExpanded) {
-      onCollapseAccordion();
-      return;
-    }
-    onOpenDetail();
-  };
-
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={
-        isExpanded
-          ? `Delivery ticket table ${order.table_id}. Tap to collapse.`
-          : `Delivery ticket table ${order.table_id}. Tap for full detail.`
-      }
-      onPress={onPressCard}
-      style={({ pressed }) => [
+    <View
+      style={[
         styles.ticketOuter,
         { width: cardWidth },
         isStale && styles.ticketOuterStale,
-        pressed && styles.ticketOuterPressed,
       ]}
     >
       <View style={styles.ticketHeader}>
@@ -361,8 +354,25 @@ function RunnerOrderTicket({
             {canDeliverAll ? "Deliver all" : "None ready"}
           </Text>
         </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={
+            isDetailOpen
+              ? `Hide full details for table ${order.table_id}`
+              : `View full details for table ${order.table_id}`
+          }
+          onPress={onToggleDetail}
+          style={({ pressed }) => [
+            styles.detailBtn,
+            pressed && styles.detailBtnPressed,
+          ]}
+        >
+          <Text style={styles.detailBtnText} numberOfLines={1}>
+            {isDetailOpen ? "▲ Hide Details" : "▼ View Details"}
+          </Text>
+        </Pressable>
       </View>
-    </Pressable>
+    </View>
   );
 }
 
@@ -373,6 +383,7 @@ type RunnerDetailModalProps = {
   modalHeight: number;
   onClose: () => void;
   onMarkAllDelivered: () => void;
+  onServeItem: (orderId: string, itemId: string, status: ActiveOrderItemStatus) => void;
 };
 
 function RunnerOrderDetailModal({
@@ -382,29 +393,14 @@ function RunnerOrderDetailModal({
   modalHeight,
   onClose,
   onMarkAllDelivered,
+  onServeItem,
 }: RunnerDetailModalProps) {
-  const [checkedItems, setCheckedItems] = useState<Set<string>>(() => new Set());
-
-  useEffect(() => {
-    setCheckedItems(new Set());
-  }, [order.id]);
-
   const liveItems = order.items.filter((it) => it.status !== "canceled");
   const readyCount = liveItems.filter((it) => it.status === "ready").length;
   const canDeliverAll = readyCount > 0;
   const ageMs = getOrderElapsedMs(order.created_at, currentTime);
   const isStale = ageMs >= STALE_AFTER_MS;
   const elapsedColor = getElapsedTimeColor(ageMs);
-
-  const toggleLocalChecked = (itemId: string) => {
-    const key = `${order.id}:${itemId}`;
-    setCheckedItems((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
 
   return (
     <Modal
@@ -467,6 +463,8 @@ function RunnerOrderDetailModal({
               const isReady = line.status === "ready";
               const isServed = line.status === "served";
               const isPending = line.status === "pending";
+              const done = isServed;
+              const tappable = isReady;
               const statusLabel = isServed
                 ? "Delivered"
                 : isReady
@@ -474,27 +472,30 @@ function RunnerOrderDetailModal({
                   : isPending
                     ? "In kitchen"
                     : "Unknown";
-              const localKey = `${order.id}:${line.id}`;
-              const locallyDone = checkedItems.has(localKey);
               return (
                 <Pressable
                   key={line.id}
                   accessibilityRole="checkbox"
-                  accessibilityState={{ checked: locallyDone }}
-                  onPress={() => toggleLocalChecked(line.id)}
+                  accessibilityState={{ checked: done, disabled: !tappable }}
+                  onPress={() => {
+                    if (tappable) onServeItem(order.id, line.id, line.status);
+                  }}
+                  disabled={!tappable}
                   style={({ pressed }) => [
                     styles.modalItemRow,
-                    locallyDone && styles.modalItemRowDone,
-                    pressed && styles.modalItemRowPressed,
+                    done && styles.modalItemRowDone,
+                    isPending && styles.modalItemRowPending,
+                    pressed && tappable && styles.modalItemRowPressed,
                   ]}
                 >
                   <View
                     style={[
                       styles.modalLocalCheckbox,
-                      locallyDone && styles.modalLocalCheckboxOn,
+                      isReady && styles.modalLocalCheckboxReady,
+                      done && styles.modalLocalCheckboxOn,
                     ]}
                   >
-                    {locallyDone ? (
+                    {done ? (
                       <Text style={styles.modalLocalCheckboxTick}>✓</Text>
                     ) : null}
                   </View>
@@ -502,13 +503,13 @@ function RunnerOrderDetailModal({
                     <Text
                       style={[
                         styles.modalLineTitle,
-                        locallyDone && styles.modalLineTitleDone,
+                        done && styles.modalLineTitleDone,
                       ]}
                     >
                       <Text
                         style={[
                           styles.modalLineQty,
-                          locallyDone && styles.modalLineQtyDone,
+                          done && styles.modalLineQtyDone,
                         ]}
                       >
                         {line.quantity ?? 1}×{" "}
@@ -518,11 +519,10 @@ function RunnerOrderDetailModal({
                     <Text
                       style={[
                         styles.modalLineStatus,
-                        locallyDone && styles.modalLineStatusDone,
+                        done && styles.modalLineStatusDone,
                       ]}
                     >
                       {statusLabel}
-                      {locallyDone ? " · Checked (local)" : ""}
                     </Text>
                     {notes ? (
                       <View style={styles.modalNotesWrap}>
@@ -530,7 +530,7 @@ function RunnerOrderDetailModal({
                         <Text
                           style={[
                             styles.modalNotesText,
-                            locallyDone && styles.modalNotesTextDone,
+                            done && styles.modalNotesTextDone,
                           ]}
                         >
                           {notes}
@@ -962,13 +962,17 @@ export function RunnerDashboardScreen() {
                   order={order}
                   currentTime={currentTime}
                   isExpanded={expandedCardId === order.id}
+                  isDetailOpen={selectedOrder?.id === order.id}
                   cardWidth={cardWidth}
                   onToggleExpand={() => toggleAccordionOrder(order.id)}
-                  onCollapseAccordion={() => setExpandedCardId(null)}
                   onOpenTicketMenu={() => openTicketMenu(order)}
                   onServeItem={onServeItem}
                   onMarkAllDelivered={() => void markAllDelivered(order)}
-                  onOpenDetail={() => setSelectedOrder(order)}
+                  onToggleDetail={() =>
+                    setSelectedOrder((prev) =>
+                      prev?.id === order.id ? null : order
+                    )
+                  }
                 />
               </View>
             ))}
@@ -991,6 +995,7 @@ export function RunnerDashboardScreen() {
           modalHeight={modalMaxHeight}
           onClose={() => setSelectedOrder(null)}
           onMarkAllDelivered={() => void markAllDelivered(selectedOrder)}
+          onServeItem={onServeItem}
         />
       ) : null}
     </View>
@@ -1169,7 +1174,6 @@ const styles = StyleSheet.create({
     borderColor: STALE_TICKET_BORDER,
     borderLeftColor: STALE_ACCENT,
   },
-  ticketOuterPressed: { opacity: 0.94 },
 
   ticketHeader: {
     flexDirection: "row",
@@ -1386,6 +1390,22 @@ const styles = StyleSheet.create({
   markDeliverBtnTextOff: {
     color: "#57534E",
   },
+  detailBtn: {
+    marginTop: 5,
+    paddingVertical: 5,
+    borderRadius: 4,
+    alignItems: "center",
+    backgroundColor: premium.runnerSoft,
+    borderWidth: 1,
+    borderColor: premium.runner,
+  },
+  detailBtnPressed: { opacity: 0.85 },
+  detailBtnText: {
+    color: premium.runner,
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 0.3,
+  },
 
   modalRoot: {
     flex: 1,
@@ -1496,6 +1516,7 @@ const styles = StyleSheet.create({
   },
   modalItemRowPressed: { opacity: 0.92 },
   modalItemRowDone: { opacity: 0.48 },
+  modalItemRowPending: { opacity: 0.55 },
   modalLocalCheckbox: {
     width: 26,
     height: 26,
@@ -1506,6 +1527,9 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginTop: 2,
     backgroundColor: "#FFFFFF",
+  },
+  modalLocalCheckboxReady: {
+    borderColor: premium.runner,
   },
   modalLocalCheckboxOn: {
     backgroundColor: "#22c55e",
